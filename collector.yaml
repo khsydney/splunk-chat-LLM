@@ -1,0 +1,110 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      cpu:
+      disk:
+      filesystem:
+      memory:
+      network:
+      # System load average metrics https://en.wikipedia.org/wiki/Load_(computing)
+      load:
+      # Paging/Swap space utilization and I/O metrics
+      paging:
+      # Aggregated system process count metrics
+      processes:
+      # System processes metrics, disabled by default
+      # process:
+
+processors:
+  resource:
+    attributes:
+    - key: appdynamics.controller.account
+      action: upsert
+      value: "se-lab"
+    - key: appdynamics.controller.host
+      action: upsert
+      value: "se-lab.saas.appdynamics.com"
+    - key: service.namespace
+      action: upsert
+      value: "Nick-LLM"
+    - key: service.name
+      action: upsert
+      value: "streamlit_openai"
+    - key: appdynamics.controller.port
+      action: upsert
+      value: 443
+  memory_limiter:
+    check_interval: 2s
+    limit_percentage: 75
+    spike_limit_percentage: 10
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 5s
+    override: false
+  batch:
+    timeout: 2s
+    send_batch_size: 512
+
+
+exporters:
+  # sapm:       # traces → Splunk APM
+  #   access_token: 1jqFGfuQd4lGy84koNNmNA
+  #   endpoint: https://ingest.us1.signalfx.com/v2/trace
+
+  # signalfx:   # metrics → Splunk IM
+  #   access_token: 1jqFGfuQd4lGy84koNNmNA
+  #   api_url: https://api.us1.signalfx.com
+  #   ingest_url: https://ingest.us1.signalfx.com
+  #   sync_host_metadata: true
+  #   correlation:
+  otlphttp/splunk:
+    traces_endpoint:  https://ingest.us1.signalfx.com/v2/trace/otlp
+    metrics_endpoint: https://ingest.us1.signalfx.com/v2/datapoint/otlp
+    logs_endpoint:    https://ingest.us1.signalfx.com/v3/event
+    headers:
+      X-SF-Token: 1jqFGfuQd4lGy84koNNmNA
+  otlphttp:
+    traces_endpoint:  https://pdx-sls-agent-api.saas.appdynamics.com
+    headers:
+      x-api-key: b21aef0d4d5241660633bf833337b6a4ad40e27e5668b9c7f96a0ea4b704bbd2
+
+  # Send everything to Splunk Observability Cloud over OTLP/HTTP
+  # otlphttp/splunk:
+  #   traces_endpoint: https://ingest.us1.signalfx.com/v2/trace/otlp
+  #   metrics_endpoint: https://ingest.us1.signalfx.com/v2/datapoint/otlp
+  #   logs_endpoint: https://ingest.us1.signalfx.com/v3/event
+  #   headers:
+  #     X-SF-Token: 1jqFGfuQd4lGy84koNNmNA       # your Splunk ingest token
+
+  # # Helpful during bring-up; remove later if noisy
+  # logging:
+  #   loglevel: info
+  # Replaces deprecated "logging" exporter
+  debug:
+    verbosity: detailed   # or: normal | detailed
+
+
+service:
+  telemetry:
+      logs:
+        level: debug 
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [otlphttp/splunk, otlphttp, debug]
+    metrics:
+      receivers: [otlp, hostmetrics]
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [otlphttp/splunk, debug]
+    logs:
+      receivers: [otlp]
+      processors: [resourcedetection, batch]
+      exporters: [otlphttp/splunk, debug]
