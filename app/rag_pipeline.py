@@ -10,7 +10,6 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough, RunnableParallel
-from langchain.evaluation import load_evaluator
 from langchain_openai import ChatOpenAI
 from sentence_transformers import CrossEncoder
 from opentelemetry import trace, metrics
@@ -226,87 +225,9 @@ llm_chain_stream_with_mem = RunnableWithMessageHistory(
 )
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Eval setup (LangChain native)
+# Eval setup (DeepEval)
 # ────────────────────────────────────────────────────────────────────────────────
-_EVAL_MODEL = os.getenv("EVAL_MODEL", "gpt-4o-mini")
-_evaluator_llm = ChatOpenAI(model=_EVAL_MODEL, temperature=0)
-
-# 1) Answer relevance (criteria)
-_answer_rel_eval = load_evaluator(
-    "criteria",
-    llm=_evaluator_llm,
-    criteria={
-        "answer_relevance": (
-            "Does the answer directly and completely address the user's question "
-            "without going off-topic? Give a score 0–1 and a short explanation."
-        )
-    },
-)
-# 2) Grounding in provided context
-_context_rel_eval = load_evaluator("context_qa", llm=_evaluator_llm)
-
-async def _aevaluate_strings(evaluator, **kwargs) -> dict:
-    if hasattr(evaluator, "aevaluate_strings"):
-        return await evaluator.aevaluate_strings(**kwargs)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: evaluator.evaluate_strings(**kwargs))
-
-async def _run_evals(question: str, answer: str, docs: List[Document]) -> dict:
-    contexts_list = [d.page_content[:4000] for d in docs]  # optional truncation
-    reference_text = "\n\n".join(contexts_list)
-    print("Reference text for eval:", reference_text)
-    print("contexts_list:", contexts_list)
-    print("question:", question)
-    # Answer relevance
-    try:
-        ans_rel = await _aevaluate_strings(
-            _answer_rel_eval,
-            prediction=answer,
-            input=question,
-        )
-    except Exception as e:
-        ans_rel = {"score": None, "value": "error", "reasoning": f"{e}"}
-
-    # Context QA – try new signature first, then fallback to old
-    try:
-        ctx_rel = await _aevaluate_strings(
-            _context_rel_eval,
-            prediction=answer,
-            input=question,
-            contexts=contexts_list,
-        )
-    except Exception:
-        try:
-            ctx_rel = await _aevaluate_strings(
-                _context_rel_eval,
-                prediction=answer,
-                input=question,
-                reference=reference_text,
-            )
-        except Exception as e2:
-            ctx_rel = {"score": None, "value": "error", "reasoning": f"{e2}"}
-
-    # def _norm(x: dict) -> dict:
-    #     return {
-    #         "score": x.get("score"),
-    #         "label": x.get("value") or x.get("label"),
-    #         "explanation": x.get("reasoning") or x.get("explanation"),
-    #         "reasoning": print(x.get("reasoning"))[:1000] if x.get("reasoning") else None,
-    #     }
-    # return {"answer_relevance": _norm(ans_rel), "context_relevance": _norm(ctx_rel)}
-
-    def _norm(x: dict) -> dict:
-        if not isinstance(x, dict):
-            return {"score": None, "label": "error", "explanation": None, "reasoning": None}
-        # prefer 'reasoning', fallback to 'explanation'
-        reasoning = x.get("reasoning") or x.get("explanation")
-        label = x.get("value") or x.get("label")
-        return {
-            "score": x.get("score"),
-            "label": label,
-            "explanation": (x.get("explanation") or reasoning or "")[:1000] or None,
-            "reasoning": (reasoning or "")[:1000] or None,
-        }
+from app.deepeval_eval import run_deepeval_metrics
 
 def _tag_eval_span(question: str, answer: str, docs: List[Document], sim: float, ev: dict):
     span = trace.get_current_span()
@@ -314,18 +235,18 @@ def _tag_eval_span(question: str, answer: str, docs: List[Document], sim: float,
     span.set_attribute("rag.eval.num_docs", len(docs))
     span.set_attribute("rag.eval.top_sources", [str(d.metadata.get("source", "")) for d in docs[:5]])
 
-    ar = (ev or {}).get("answer_relevance", {}) or {}
-    cr = (ev or {}).get("context_relevance", {}) or {}
-
-    span.set_attribute("rag.eval.answer_relevance.score", float(ar.get("score") if ar.get("score") is not None else -1.0))
-    span.set_attribute("rag.eval.answer_relevance.label", str(ar.get("label") or "unknown"))
-    if ar.get("explanation"):
-        span.set_attribute("rag.eval.answer_relevance.reason", str(ar["explanation"])[:800])
-
-    span.set_attribute("rag.eval.context_relevance.score", float(cr.get("score") if cr.get("score") is not None else -1.0))
-    span.set_attribute("rag.eval.context_relevance.label", str(cr.get("label") or "unknown"))
-    if cr.get("explanation"):
-        span.set_attribute("rag.eval.context_relevance.reason", str(cr["explanation"])[:800])
+    ev = ev or {}
+    for metric_key, otel_prefix in [
+        ("answer_relevancy",    "rag.eval.answer_relevancy"),
+        ("faithfulness",        "rag.eval.faithfulness"),
+        ("contextual_relevancy","rag.eval.contextual_relevancy"),
+    ]:
+        m = ev.get(metric_key) or {}
+        score = m.get("score")
+        span.set_attribute(f"{otel_prefix}.score", float(score) if score is not None else -1.0)
+        span.set_attribute(f"{otel_prefix}.passed", bool(m.get("passed", False)))
+        if m.get("reason"):
+            span.set_attribute(f"{otel_prefix}.reason", str(m["reason"])[:800])
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Scoring helpers
@@ -399,18 +320,18 @@ async def stream_generate(question: str, session_id: str = "default") -> AsyncGe
     except Exception:
         pass
 
-    # evals (robust to LC version)
-    evals = await _run_evals(vals["question"], full_answer, vals["docs"])
+    # DeepEval metrics (answer relevancy, faithfulness, contextual relevancy)
+    evals = await run_deepeval_metrics(vals["question"], full_answer, vals["docs"])
 
-    # A tracer for our custom eval span
+    # attach metrics to a dedicated child span so they always appear in Splunk APM
     _otel_tracer = trace.get_tracer("app.rag.eval")
-    # attach metrics to a dedicated child span so they always appear
     with _otel_tracer.start_as_current_span("rag.eval"):
         _tag_eval_span(vals["question"], full_answer, vals["docs"], sim, evals)
 
-    # final informative line for the stream
+    ar = (evals.get("answer_relevancy") or {}).get("score")
+    fa = (evals.get("faithfulness") or {}).get("score")
+    cr = (evals.get("contextual_relevancy") or {}).get("score")
     yield (
         f"\n\n[EVAL] cos={sim:.2f}  "
-        f"ans_rel={evals['answer_relevance']['score']}  "
-        f"ctx_rel={evals['context_relevance']['score']}"
+        f"ans_rel={ar}  faithfulness={fa}  ctx_rel={cr}"
     )
