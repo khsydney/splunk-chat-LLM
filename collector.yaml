@@ -69,12 +69,7 @@ exporters:
     metrics_endpoint: https://ingest.us1.signalfx.com/v2/datapoint/otlp
     logs_endpoint:    https://ingest.us1.signalfx.com/v3/event
     headers:
-      X-SF-Token: 1jqFGfuQd4lGy84koNNmNA
-  otlphttp:
-    traces_endpoint:  https://pdx-sls-agent-api.saas.appdynamics.com
-    headers:
-      x-api-key: b21aef0d4d5241660633bf833337b6a4ad40e27e5668b9c7f96a0ea4b704bbd2
-
+      X-SF-Token: slhW3v5VXzpyj5uf_GCevw
   # Send everything to Splunk Observability Cloud over OTLP/HTTP
   # otlphttp/splunk:
   #   traces_endpoint: https://ingest.us1.signalfx.com/v2/trace/otlp
@@ -98,13 +93,13 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, resourcedetection, batch]
-      exporters: [otlphttp/splunk, otlphttp, debug]
+      processors: [memory_limiter, resource, resourcedetection, batch]
+      exporters: [otlphttp/splunk, debug]
     metrics:
       receivers: [otlp, hostmetrics]
-      processors: [memory_limiter, resourcedetection, batch]
+      processors: [memory_limiter, resource, resourcedetection, batch]
       exporters: [otlphttp/splunk, debug]
     logs:
       receivers: [otlp]
-      processors: [resourcedetection, batch]
+      processors: [resource, resourcedetection, batch]
       exporters: [otlphttp/splunk, debug]
