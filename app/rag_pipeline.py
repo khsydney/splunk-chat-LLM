@@ -1,11 +1,12 @@
 # app/rag_pipeline.py
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import asyncio
 import numpy as np
 from typing import List, Dict, Any, Tuple, AsyncGenerator
 
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_milvus import Milvus
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.prompts import ChatPromptTemplate
@@ -13,6 +14,12 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough, Runnab
 from langchain_openai import ChatOpenAI
 from sentence_transformers import CrossEncoder
 from opentelemetry import trace, metrics
+from opentelemetry.util.genai.types import (
+    Workflow, AgentInvocation, InputMessage, OutputMessage, Text, EvaluationResult,
+)
+from opentelemetry.util.genai.handler import get_telemetry_handler
+
+_genai_handler = get_telemetry_handler()
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Chat History
@@ -81,48 +88,35 @@ COLL = os.getenv("MILVUS_COLLECTION", "rag_chunks")
 retrieval_TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "100"))
 rerank_TOP_K = int(os.getenv("RERANK_TOP_K", "70"))
 
-# Lazy retriever (so Milvus init spans belong to first request trace)
-_retriever = None
-def get_retriever():
-    global _retriever
-    if _retriever is None:
-        vs = Milvus(
-            collection_name=COLL,
-            embedding_function=emb,
-            connection_args={"uri": MILVUS_URI},
-            text_field="text",
-            vector_field="vector",
-            search_params={"metric_type":"IP","params":{"nprobe":100}},
+# Lazy MilvusClient — uses the new connection manager, avoids the legacy
+# Collection(using=alias) path that breaks in newer pymilvus versions.
+_milvus_client = None
+
+def _get_milvus_client():
+    global _milvus_client
+    if _milvus_client is None:
+        from pymilvus import MilvusClient
+        _milvus_client = MilvusClient(uri=MILVUS_URI)
+    return _milvus_client
+
+def _milvus_search(question: str, k: int = retrieval_TOP_K) -> List[Document]:
+    vec = emb.embed_query(question)
+    client = _get_milvus_client()
+    results = client.search(
+        collection_name=COLL,
+        data=[vec],
+        limit=k,
+        output_fields=["text", "source"],
+        search_params={"metric_type": "IP", "params": {"nprobe": 100}},
+    )[0]
+    return [
+        Document(
+            page_content=hit["entity"].get("text", ""),
+            metadata={"source": hit["entity"].get("source", "")},
         )
-        #1)
-        _retriever = vs.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": retrieval_TOP_K},
-        ).with_config({"run_name": "MilvusSearch"})
-        # ------------ side note --------------
-        # other options available for search types
-        #2)
-        # _retriever = vs.as_retriever(
-        #     search_type="mmr",
-        #     search_kwargs={"k": retrieval_TOP_K,
-        #                    "fetch_k": max(60, retrieval_TOP_K * 3),
-        #                 #    "param": {"metric_type": "IP", "params": {"nprobe": 100}},
-        #                    "lambda_mult": 1
-        #                    },
-        # ).with_config({"run_name": "MilvusSearch"})
-        #3)
-        # _retriever = vs.as_retriever(
-        #     search_type="similarity_score_threshold",
-        #     search_kwargs={"k": retrieval_TOP_K,
-        #                    "score_threshold": 0.3
-        #                    },
-        # ).with_config({"run_name": "MilvusSearch"})
+        for hit in results
+    ]
 
-    return _retriever
-
-# Make retrieval truly async for better parenting & no blocking
-# async def _retrieve_async(q: str):
-#     return await get_retriever().ainvoke(q)
 
 # Re-ranker to improve answer relevance
 try:
@@ -160,8 +154,15 @@ FormatContext = RunnableLambda(
 # Prompt & LLMs
 # ────────────────────────────────────────────────────────────────────────────────
 prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful assistant. Use the context to answer. Include references when helpful.\n\nContext:\n{context}"),
-    ("placeholder", "{history}"), #injecting prior chat history
+    ("system",
+     "You are a document Q&A assistant. "
+     "Answer questions using the context below or the conversation history. "
+     "If a question is a follow-up to something already discussed, use the conversation history to answer. "
+     "Only block questions that are completely unrelated to the documents and have no connection to the conversation history — "
+     "for those, respond with exactly: 'I can only answer questions related to the documents in my knowledge base.' "
+     "Always follow the user's instructions carefully.\n\n"
+     "Context:\n{context}"),
+    ("placeholder", "{history}"),
     ("human", "{question}"),
 ]).with_config({"run_name": "ChatPromptTemplate"})
 
@@ -184,7 +185,7 @@ _llm_block = ChatOpenAI(model=CHAT_MODEL, temperature=TEMPERATURE, streaming=Fal
 # ).with_config({"run_name": "RetrieveDocs"})
 
 retrieve_stage = (RunnableLambda(lambda x: {
-        "docs": get_retriever().invoke(x),
+        "docs": _milvus_search(x),
         "question": x,
     })
 ).with_config({"run_name": "RetrieveDocs"})
@@ -229,11 +230,15 @@ llm_chain_stream_with_mem = RunnableWithMessageHistory(
 # ────────────────────────────────────────────────────────────────────────────────
 from app.deepeval_eval import run_deepeval_metrics
 
+def _sanitize(s: str, max_len: int = 800) -> str:
+    """Strip lone surrogates and other chars that break JSON serialization in Splunk."""
+    return s.encode("utf-8", errors="replace").decode("utf-8")[:max_len]
+
 def _tag_eval_span(question: str, answer: str, docs: List[Document], sim: float, ev: dict):
     span = trace.get_current_span()
     span.set_attribute("rag.eval.cosine_similarity", float(sim))
     span.set_attribute("rag.eval.num_docs", len(docs))
-    span.set_attribute("rag.eval.top_sources", [str(d.metadata.get("source", "")) for d in docs[:5]])
+    span.set_attribute("rag.eval.top_sources", [_sanitize(str(d.metadata.get("source", ""))) for d in docs[:5]])
 
     ev = ev or {}
     for metric_key, otel_prefix in [
@@ -246,7 +251,7 @@ def _tag_eval_span(question: str, answer: str, docs: List[Document], sim: float,
         span.set_attribute(f"{otel_prefix}.score", float(score) if score is not None else -1.0)
         span.set_attribute(f"{otel_prefix}.passed", bool(m.get("passed", False)))
         if m.get("reason"):
-            span.set_attribute(f"{otel_prefix}.reason", str(m["reason"])[:800])
+            span.set_attribute(f"{otel_prefix}.reason", _sanitize(str(m["reason"])))
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Scoring helpers
@@ -279,18 +284,28 @@ async def generate(question: str) -> dict:
     ai_msg = await (_llm_block | prompt).ainvoke({"question": vals["question"], "context": vals["context"]})
     answer_text = ai_msg.content or ""
 
-    # record score metric
     sim = _score_answer_vs_context(answer_text, vals["docs"])
     try:
         _score_hist.record(sim, attributes={"k": rerank_TOP_K})
     except Exception:
         pass
 
+    evals = await run_deepeval_metrics(vals["question"], answer_text, vals["docs"])
+
+    _otel_tracer = trace.get_tracer("app.rag.eval")
+    with _otel_tracer.start_as_current_span("rag.eval"):
+        _tag_eval_span(vals["question"], answer_text, vals["docs"], sim, evals)
+
     return {
         "answer": answer_text,
         "contexts": [d.page_content[:400] for d in vals["docs"]],
         "score": sim,
-        # token usage & LLM attrs are captured by OpenLLMetry/OTel auto-instr
+        "eval": {
+            "cosine_similarity": round(sim, 4),
+            "answer_relevancy": evals.get("answer_relevancy"),
+            "faithfulness": evals.get("faithfulness"),
+            "contextual_relevancy": evals.get("contextual_relevancy"),
+        },
     }
 
 
@@ -298,39 +313,78 @@ async def generate(question: str) -> dict:
 # Streaming path (text/plain)
 # ────────────────────────────────────────────────────────────────────────────────
 async def stream_generate(question: str, session_id: str = "default") -> AsyncGenerator[str, None]:
-    vals = await prep_context.ainvoke(question)
+    workflow = Workflow(
+        name="llm-call",
+        workflow_type="rag",
+        input_messages=[InputMessage(role="user", parts=[Text(content=question)])],
+        conversation_id=session_id,
+    )
+    _genai_handler.start_workflow(workflow)
 
-    buf: List[str] = []
-    # ⬇️ Below part decides to run with history or without chat history
-    async for chunk in llm_chain_stream_with_mem.astream(
-        {"question": vals["question"], "context": vals["context"]},
-        config={"configurable": {"session_id": session_id}}
-    ):
-        text = chunk.content if isinstance(chunk, AIMessageChunk) else str(chunk)
-        if text:
-            buf.append(text)
-            yield text
+    agent = AgentInvocation(
+        name="llm-as-a-judge",
+        agent_type="rag",
+        model=CHAT_MODEL,
+        provider="openai",
+        conversation_id=session_id,
+        input_messages=[InputMessage(role="user", parts=[Text(content=question)])],
+    )
+    _genai_handler.start_agent(agent)
 
-    full_answer = "".join(buf).strip()
-
-    # similarity metric
-    sim = _score_answer_vs_context(full_answer, vals["docs"])
+    ar = fa = cr = sim = 0.0
     try:
-        _score_hist.record(sim, attributes={"k": rerank_TOP_K})
-    except Exception:
-        pass
+        vals = await prep_context.ainvoke(question)
 
-    # DeepEval metrics (answer relevancy, faithfulness, contextual relevancy)
-    evals = await run_deepeval_metrics(vals["question"], full_answer, vals["docs"])
+        buf: List[str] = []
+        async for chunk in llm_chain_stream_with_mem.astream(
+            {"question": vals["question"], "context": vals["context"]},
+            config={"configurable": {"session_id": session_id}}
+        ):
+            text = chunk.content if isinstance(chunk, AIMessageChunk) else str(chunk)
+            if text:
+                buf.append(text)
+                yield text
 
-    # attach metrics to a dedicated child span so they always appear in Splunk APM
-    _otel_tracer = trace.get_tracer("app.rag.eval")
-    with _otel_tracer.start_as_current_span("rag.eval"):
-        _tag_eval_span(vals["question"], full_answer, vals["docs"], sim, evals)
+        full_answer = "".join(buf).strip()
+        agent.output_messages = [
+            OutputMessage(role="assistant", parts=[Text(content=full_answer)], finish_reason="stop")
+        ]
 
-    ar = (evals.get("answer_relevancy") or {}).get("score")
-    fa = (evals.get("faithfulness") or {}).get("score")
-    cr = (evals.get("contextual_relevancy") or {}).get("score")
+        sim = _score_answer_vs_context(full_answer, vals["docs"])
+        try:
+            _score_hist.record(sim, attributes={"k": rerank_TOP_K})
+        except Exception:
+            pass
+
+        # DeepEval → Splunk native evaluation
+        try:
+            evals = await run_deepeval_metrics(vals["question"], full_answer, vals["docs"])
+            ar = (evals.get("answer_relevancy") or {}).get("score") or 0.0
+            fa = (evals.get("faithfulness") or {}).get("score") or 0.0
+            cr = (evals.get("contextual_relevancy") or {}).get("score") or 0.0
+
+            eval_results = [
+                EvaluationResult(
+                    metric_name="answer_relevancy",   # → "relevance" in Splunk
+                    score=ar,
+                    label="pass" if ar >= 0.5 else "fail",
+                    explanation=(evals.get("answer_relevancy") or {}).get("reason"),
+                ),
+                EvaluationResult(
+                    metric_name="faithfulness",        # → "hallucination" in Splunk
+                    score=fa,
+                    label="pass" if fa >= 0.5 else "fail",
+                    explanation=(evals.get("faithfulness") or {}).get("reason"),
+                ),
+            ]
+            _genai_handler.evaluation_results(agent, eval_results)
+        except Exception:
+            pass
+
+    finally:
+        _genai_handler.stop_agent(agent)
+        _genai_handler.stop_workflow(workflow)
+
     yield (
         f"\n\n[EVAL] cos={sim:.2f}  "
         f"ans_rel={ar}  faithfulness={fa}  ctx_rel={cr}"

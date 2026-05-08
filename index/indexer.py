@@ -3,8 +3,7 @@ from .loader import load_docs
 from .chunker import chunk
 from .embed import make_embeddings
 
-from langchain_milvus import Milvus
-from pymilvus import Collection, FieldSchema, CollectionSchema, DataType, utility, connections
+from pymilvus import Collection, FieldSchema, CollectionSchema, DataType, utility, connections, MilvusClient
 
 
 # def build_index():
@@ -93,20 +92,16 @@ def build_index():
     )
     collection.load()
 
-    # 5. Load the documents using the existing collection
-    vs = Milvus(
-        collection_name="rag_chunks",
-        embedding_function=embs,
-        connection_args={"uri": "http://localhost:19530"},
-        text_field="text",
-        vector_field="vector",
-        # auto_id=False # Since we are creating the collection, we can let pymilvus handle the IDs
-    )
-    vs.add_texts(
-        texts=texts,
-        metadatas=metas,
-    )
-    print("Index built and data loaded.")
+    # 5. Embed and insert directly via MilvusClient
+    MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
+    client = MilvusClient(uri=MILVUS_URI)
+    vectors = embs.embed_documents(texts)
+    rows = [
+        {"text": t, "vector": v, **m}
+        for t, v, m in zip(texts, vectors, metas)
+    ]
+    client.insert(collection_name="rag_chunks", data=rows)
+    print(f"Index built and {len(rows)} chunks loaded.")
 
     # from langchain_milvus import Milvus
     # vs = Milvus.from_texts(

@@ -1,7 +1,11 @@
 # app/main.py
 import os
+from dotenv import load_dotenv
+load_dotenv()
 from typing import Optional
 from fastapi import FastAPI, HTTPException
+from opentelemetry import trace
+from opentelemetry.sdk.trace import SpanProcessor
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -28,6 +32,27 @@ from app.rag_pipeline import (
 #     # instruments={Instruments.LANGCHAIN, Instruments.OPENAI, Instruments.MILVUS},
 #     disable_batch=True,
 # )
+
+def _sanitize(v):
+    if isinstance(v, str):
+        return v.encode("utf-8", errors="replace").decode("utf-8")
+    if isinstance(v, (list, tuple)):
+        return type(v)(_sanitize(x) for x in v)
+    return v
+
+class _SanitizingProcessor(SpanProcessor):
+    """Scrub lone surrogates from every span attribute before the batch exporter ships it to Splunk."""
+    def on_start(self, span, parent_context=None): pass
+    def on_end(self, span):
+        try:
+            attrs = span._attributes
+            if attrs:
+                for k, v in list(attrs.items()):
+                    attrs[k] = _sanitize(v)
+        except Exception:
+            pass
+    def shutdown(self): pass
+    def force_flush(self, timeout_millis=30000): return True
 
 app = FastAPI(title="RAG Server")
 
@@ -66,10 +91,8 @@ async def chat(req: Ask):
     async def token_stream():
         try:
             async for chunk in rag_stream(prompt, session_id=sid):
-                # stream back plain text tokens
                 yield chunk if isinstance(chunk, str) else str(chunk)
         except Exception as e:
-            # surface errors to the UI as part of the stream
             yield f"\n[stream-error] {e}\n"
 
     return StreamingResponse(token_stream(), media_type="text/plain")
@@ -86,9 +109,16 @@ async def generate_endpoint(req: Ask):
 
 # Optional: warm up heavy models so first call from Streamlit doesn't lag
 @app.on_event("startup")
+async def setup_telemetry():
+    tp = trace.get_tracer_provider()
+    tp.add_span_processor(_SanitizingProcessor())
+
+@app.on_event("startup")
 async def warmup():
-    try:
-        await rag_generate("warmup")
-    except Exception:
-        # ignore warmup failures; real requests will still run
-        pass
+    import asyncio
+    async def _run():
+        try:
+            await rag_generate("warmup")
+        except Exception:
+            pass
+    asyncio.create_task(_run())

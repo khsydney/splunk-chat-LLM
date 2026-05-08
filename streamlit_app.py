@@ -1,5 +1,7 @@
 # streamlit_app.py
 import os, time, re, subprocess, pathlib
+from dotenv import load_dotenv
+load_dotenv()
 import streamlit as st
 import httpx
 import uuid
@@ -78,21 +80,13 @@ for m in st.session_state.messages:
 
 # --- Helper: stream from backend ---------------------------------------------
 def stream_from_backend(question: str):
-    """
-    Yields incrementally growing text from FastAPI /chat,
-    which streams text/plain chunks.
-    """
+    """Yields raw text chunks from FastAPI /chat for use with st.write_stream."""
     url = api_base.rstrip("/") + "/chat"
-    t0 = time.time()
     with httpx.stream("POST", url, json={"question": question, "session_id": st.session_state.sid}, timeout=None) as resp:
         resp.raise_for_status()
-        acc = ""
         for chunk in resp.iter_text():
-            if not chunk:
-                continue
-            acc += chunk
-            yield acc, False, None
-    yield acc, True, time.time() - t0
+            if chunk:
+                yield chunk
 
 # --- Chat input ---------------------------------------------------------------
 prompt = st.chat_input("Ask a question…")
@@ -102,21 +96,13 @@ if prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        placeholder = st.empty()
-        final = ""
-        elapsed = None
+        t0 = time.time()
         try:
-            for acc, done, et in stream_from_backend(prompt):
-                placeholder.markdown(acc)
-                final = acc
-                if done:
-                    elapsed = et
+            final = st.write_stream(stream_from_backend(prompt))
         except Exception as e:
-            placeholder.error(f"Request failed: {e}")
+            st.error(f"Request failed: {e}")
             final = f"_Error: {e}_"
-
-        if elapsed is not None:
-            st.caption(f"Response time: {elapsed:.2f}s")
+        st.caption(f"Response time: {time.time() - t0:.2f}s")
 
         # Basic source parser: collects [source:page] tokens from the answer
         cites = sorted(set(re.findall(r"\[([^\[\]\n]+)\]", final)))
