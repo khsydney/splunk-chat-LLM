@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 load_dotenv()
 import streamlit as st
 import httpx
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+HTTPXClientInstrumentor().instrument()
 import uuid
 
 if "sid" not in st.session_state:

@@ -4,13 +4,11 @@ uvicorn[standard]
 pydantic-settings
 httpx
 python-dotenv
-langsmith
 langchain
 langchain-openai
 langchain-community
 langchain-core
 langchain-text-splitters
-chromadb
 langchain-milvus
 pymilvus
 langchain-huggingface
@@ -19,24 +17,24 @@ pypdf
 unstructured[all-docs]
 html2text
 markdown
-ragas
-datasets
-pandas
 deepeval
 streamlit
 redis
-milvus
-asyncio
 requests
 
-# --- OpenTelemetry core / auto-instrumentation ---
-# opentelemetry-distro
-# opentelemetry-exporter-otlp
-# opentelemetry-instrumentation
+# --- Splunk GenAI SDK ---
+# Not on PyPI — install from source:
+#   pip install /path/to/splunk-otel-python-contrib/util/opentelemetry-util-genai
+#   pip install /path/to/splunk-otel-python-contrib/util/opentelemetry-util-genai-evals
+#   pip install /path/to/splunk-otel-python-contrib/util/opentelemetry-util-genai-evals-deepeval
+#   pip install /path/to/splunk-otel-python-contrib/util/opentelemetry-util-genai-emitters-splunk
 splunk-opentelemetry>=2.0.0
 splunk-otel-util-genai
+splunk-otel-util-genai-evals
+splunk-otel-genai-evals-deepeval
+splunk-otel-genai-emitters-splunk
 
-# --- Web & client instrumentors (no uvicorn pkg) ---
+# --- OpenTelemetry instrumentation ---
 opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-asgi
 opentelemetry-instrumentation-httpx
@@ -46,10 +44,5 @@ opentelemetry-instrumentation-logging
 opentelemetry-instrumentation-milvus
 opentelemetry-instrumentation-asyncio
 opentelemetry-instrumentation-redis
-
-# --- LLM / RAG instrumentors (optional but useful) ---
 opentelemetry-instrumentation-langchain
 opentelemetry-instrumentation-openai
-
-# # --- OpenLLMetry SDK (LLM-aware spans/metrics) ---
-# traceloop-sdk
