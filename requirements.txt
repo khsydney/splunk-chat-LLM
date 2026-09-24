@@ -46,3 +46,10 @@ opentelemetry-instrumentation-asyncio
 opentelemetry-instrumentation-redis
 opentelemetry-instrumentation-langchain
 opentelemetry-instrumentation-openai
+
+# --- Jev vs Luna-2 dual observability (app/jev) ---
+langfuse>=4.15            # OTel-native SDK; native Jev evaluator lives server-side
+typesafe-sdk>=0.7.1       # TypeSafe AI Jev (System One API)
+splunk-ao>=0.4.0          # Splunk Agent Observability (formerly Galileo) span processor + evaluators
+# agent-control-sdk       # optional runtime guardrail on the Splunk side (Python 3.12+)
+pytest                    # tests/test_jev_integration.py runs fully offline

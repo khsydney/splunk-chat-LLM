@@ -151,7 +151,10 @@ llm_chain_stream_with_mem = RunnableWithMessageHistory(
 # ────────────────────────────────────────────────────────────────────────────────
 # Streaming entry point
 # ────────────────────────────────────────────────────────────────────────────────
-async def stream_generate(question: str, session_id: str = "default") -> AsyncGenerator[str, None]:
+async def stream_generate(question: str, session_id: str = "default",
+                          capture: dict | None = None) -> AsyncGenerator[str, None]:
+    """Stream the answer. If `capture` is given, the reranked documents and the formatted
+    context are placed in it (used by the Jev post-response evaluation in app.jev.turn)."""
     workflow = Workflow(
         name="rag-pipeline",
         workflow_type="rag",
@@ -203,6 +206,10 @@ async def stream_generate(question: str, session_id: str = "default") -> AsyncGe
             vals = await FormatContext.ainvoke(reranked)
         finally:
             _genai_handler.stop_step(aug_step)
+        if capture is not None:
+            capture["context"] = vals["context"]
+            capture["docs"] = [{"source": d.metadata.get("source", ""), "text": d.page_content}
+                               for d in vals["docs"]]
 
         # 4. LLM call wrapped in AgentInvocation
         agent = AgentInvocation(
