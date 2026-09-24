@@ -62,13 +62,26 @@ sys.modules["app.rag_pipeline"] = fake
 
 LF, SP = InMemorySpanExporter(), InMemorySpanExporter()
 SCORES: list[dict] = []
-PROVIDER = TracerProvider()
-trace.set_tracer_provider(PROVIDER)
+
+# Use whatever TracerProvider is (or becomes) global. OpenTelemetry only honours the FIRST
+# set_tracer_provider() in a process; on machines where a pytest plugin (deepeval, an OTel
+# distro, ...) has already installed an SDK provider, a fresh one here would be silently
+# ignored and the app would attach to a different provider than these exporters.
+_existing = trace.get_tracer_provider()
+_existing = getattr(_existing, "_provider", _existing)
+if hasattr(_existing, "add_span_processor"):
+    PROVIDER = _existing
+else:
+    PROVIDER = TracerProvider()
+    trace.set_tracer_provider(PROVIDER)
+    _now = trace.get_tracer_provider()
+    PROVIDER = getattr(_now, "_provider", _now)
 
 from app.jev import telemetry as jev_telemetry  # noqa: E402
 
 jev_telemetry.attach(PROVIDER, langfuse_span_exporter=LF, splunk_exporter=SP)  # startup's attach() becomes a no-op
-jev_telemetry.langfuse().create_score = lambda **kw: SCORES.append(kw)
+LANGFUSE_CLIENT = jev_telemetry.langfuse()
+LANGFUSE_CLIENT.create_score = lambda **kw: SCORES.append(kw)
 
 from app.main import app  # noqa: E402
 
@@ -76,6 +89,8 @@ from app.main import app  # noqa: E402
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
+        # the app must have attached to the SAME provider/client the test instrumented
+        assert jev_telemetry.langfuse() is LANGFUSE_CLIENT, "app startup attached to a different provider"
         yield c
 
 
