@@ -610,16 +610,13 @@ Appends the answer to history and forces a full rerun so Streamlit re-renders th
 ## How to start everything
 
 ```bash
-# 1. Start infrastructure (Milvus, Redis, OTel collector)
-docker compose up -d
+# Everything (containers + backend + frontend) with one command:
+./run.sh
 
-# 2. Start backend (from project root — never use --reload)
-cd /Users/nkim2/AI/claude_code/splunk-chat-LLM
-set -a && source .env && set +a
-OTEL_SERVICE_NAME=chat-rag opentelemetry-instrument uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# 3. Start Streamlit UI (separate terminal)
-streamlit run streamlit_app.py --server.port 8501
+# Or step by step:
+./run.sh infra    # 1. OTel collector, Milvus, Redis, Attu
+./run.sh index    # 2. (first run) build the Milvus index from data/docs
+./run.sh app      # 3. backend (no --reload) + Streamlit UI
 ```
 
 > **Why no `--reload`?** Uvicorn's `--reload` spawns a child worker process. The OTel SDK exporters are initialized in the parent process and do not get re-initialized in the child, so no traces reach Splunk.
