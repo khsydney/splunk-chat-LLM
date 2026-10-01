@@ -1,3 +1,7 @@
 .env
 .env.*
 docker/volumes/
+
+# run.sh output
+logs/
+!.env.example

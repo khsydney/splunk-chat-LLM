@@ -21,6 +21,13 @@ deepeval
 streamlit
 redis
 requests
+certifi
+
+# --- Galileo (LLM logging + Agent Control guardrails) ---
+galileo
+galileo-core
+agent-control-sdk
+agent-control-evaluator-galileo
 
 # --- Splunk GenAI SDK ---
 # Not on PyPI — install from source:
