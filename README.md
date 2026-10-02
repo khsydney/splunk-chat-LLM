@@ -72,7 +72,7 @@ We use opentelemetry-instrument to auto-instrument the Python app for observabil
 
 ### Backend (FastAPI with Uvicorn)
 ```Bash
-opentelemetry-instrument uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+opentelemetry-instrument uvicorn app.main:app --host 0.0.0.0 --port 8100 --reload
 ```
 ### Frontend (Streamlit UI)
 ```Bash
@@ -153,11 +153,11 @@ MOCK_JEV=1 python -m pytest -q tests                  # offline check of the who
 
 # start exactly as before — collector, Milvus, Redis, then:
 OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true \
-opentelemetry-instrument uvicorn app.main:app --host 0.0.0.0 --port 8000
+opentelemetry-instrument uvicorn app.main:app --host 0.0.0.0 --port 8100
 opentelemetry-instrument streamlit run streamlit_app.py     # optional UI
 
 python scripts/run_scenarios.py                       # 15 turns: benign, Korean, hallucination bait, injection, PII, toxic, off-topic, multi-turn
-curl -s localhost:8000/health                         # {"ok":true,"jev":"on","langfuse":true,"splunk_ao":true}
+curl -s localhost:8100/health                         # {"ok":true,"jev":"on","langfuse":true,"splunk_ao":true}
 ```
 
 Then open the **same trace id** in both consoles (filter on tag/session `jev-vs-luna`) and walk the
@@ -197,8 +197,8 @@ TypeSafe key), then *Evaluators → New decision model evaluator* following `scr
 
 **Redis Insight UI** → http://localhost:5540
 
-**FastAPI Backend** → http://localhost:8000
+**FastAPI Backend** → http://localhost:8100
 
-**Streamlit UI** → http://localhost:8502
+**Streamlit UI** → http://localhost:8601
 
 

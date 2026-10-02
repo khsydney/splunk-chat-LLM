@@ -15,7 +15,7 @@ st.set_page_config(page_title="Chat RAG (Streamlit)", layout="wide")
 st.title("Chat LLM with RAG – Splunk")
 
 # --- Sidebar controls ---------------------------------------------------------
-default_api = os.getenv("API_BASE", "http://localhost:8000")
+default_api = os.getenv("API_BASE", "http://localhost:8100")
 api_base = st.sidebar.text_input("Backend base URL", value=default_api)
 st.sidebar.caption("Your FastAPI server exposing POST /chat (streamed text/plain)")
 
