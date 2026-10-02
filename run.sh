@@ -9,6 +9,7 @@
 #   ./run.sh stop       stop backend, frontend and all containers
 #
 # Optional env overrides: VENV=/path/to/venv  BACKEND_PORT=8000  FRONTEND_PORT=8501
+#                         OTEL_ALT_GRPC_PORT=14317  OTEL_ALT_HTTP_PORT=14318
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,6 +17,9 @@ cd "$ROOT"
 
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-8501}"
+# Used when 4317/4318 are already taken by another collector (e.g. another project's)
+OTEL_ALT_GRPC_PORT="${OTEL_ALT_GRPC_PORT:-14317}"
+OTEL_ALT_HTTP_PORT="${OTEL_ALT_HTTP_PORT:-14318}"
 LOG_DIR="$ROOT/logs"
 mkdir -p "$LOG_DIR"
 
@@ -72,14 +76,55 @@ run_container() {
   fi
 }
 
+# Host port the otelcol container publishes for OTLP (empty if not running).
+otelcol_port() {
+  { docker port otelcol "$1/tcp" 2>/dev/null || true; } | head -n1 | sed 's/.*://'
+}
+
+# Start this app's own collector. If 4317/4318 belong to another collector,
+# run side by side on the alternate ports instead of skipping.
+start_otelcol() {
+  local grpc=4317 http=4318
+  if port_in_use 4317 && [[ "$(otelcol_port 4317)" != "4317" ]]; then
+    grpc="$OTEL_ALT_GRPC_PORT"; http="$OTEL_ALT_HTTP_PORT"
+    warn "Port 4317 is used by another collector — running otelcol on $grpc/$http instead."
+  fi
+  info "Starting OpenTelemetry Collector (ports $grpc/$http)"
+
+  if docker ps -a --format '{{.Names}}' | grep -qx otelcol; then
+    if [[ "$(docker inspect -f '{{(index (index .HostConfig.PortBindings "4317/tcp") 0).HostPort}}' otelcol 2>/dev/null)" != "$grpc" ]]; then
+      docker rm -f otelcol >/dev/null   # stateless; recreate with the right ports
+    fi
+  fi
+  if docker ps --format '{{.Names}}' | grep -qx otelcol; then
+    ok "otelcol already running"
+  elif docker ps -a --format '{{.Names}}' | grep -qx otelcol; then
+    docker start otelcol >/dev/null && ok "otelcol started"
+  else
+    docker run -d --name otelcol \
+      -p "$grpc":4317 -p "$http":4318 \
+      -v "$ROOT/collector.yaml":/etc/otelcol/config.yaml \
+      otel/opentelemetry-collector-contrib:latest \
+      --config /etc/otelcol/config.yaml >/dev/null && ok "otelcol created"
+  fi
+}
+
+# Point the apps at this project's collector, whichever ports it ended up on.
+use_otelcol_endpoint() {
+  local grpc http
+  grpc="$(otelcol_port 4317)"; http="$(otelcol_port 4318)"
+  if [[ -z "$grpc" ]]; then
+    warn "otelcol is not running — telemetry goes to OTEL_EXPORTER_OTLP_ENDPOINT from .env"
+    return
+  fi
+  export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:$grpc"
+  [[ -n "${TRACELOOP_BASE_URL:-}" ]] && export TRACELOOP_BASE_URL="http://localhost:$http"
+  ok "Telemetry → otelcol on localhost:$grpc (gRPC) / $http (HTTP)"
+}
+
 start_infra() {
   check_docker
-  info "Starting OpenTelemetry Collector (ports 4317/4318)"
-  run_container otelcol 4317 \
-    -p 4317:4317 -p 4318:4318 \
-    -v "$ROOT/collector.yaml":/etc/otelcol/config.yaml \
-    otel/opentelemetry-collector-contrib:latest \
-    --config /etc/otelcol/config.yaml
+  start_otelcol
 
   info "Starting Milvus (etcd + MinIO + standalone)"
   docker compose -f "$MILVUS_COMPOSE" up -d
@@ -116,20 +161,27 @@ stop_infra() {
 
 # ---------------------------------------------------------------- apps
 PIDS=()
+PID_FILE="$LOG_DIR/.pids"
 
 stop_apps() {
   local pid
   for pid in "${PIDS[@]:-}"; do
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
   done
-  # Also catch instances started by a previous ./run.sh
-  pkill -f "uvicorn app.main:app" 2>/dev/null || true
-  pkill -f "streamlit run streamlit_app.py" 2>/dev/null || true
+  # Also stop instances started by a previous ./run.sh (only ours — never other projects)
+  if [[ -f "$PID_FILE" ]]; then
+    while read -r pid; do
+      [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    done <"$PID_FILE"
+    rm -f "$PID_FILE"
+  fi
 }
 
 start_apps() {
   load_env
   activate_venv
+  check_docker
+  use_otelcol_endpoint
   command -v opentelemetry-instrument >/dev/null || die "opentelemetry-instrument not found. Run: pip install -r requirements.txt"
 
   port_in_use "$BACKEND_PORT"  && die "Port $BACKEND_PORT is in use. Run ./run.sh stop or set BACKEND_PORT."
@@ -149,6 +201,7 @@ start_apps() {
     >"$LOG_DIR/frontend.log" 2>&1 &
   PIDS+=($!)
 
+  printf '%s\n' "${PIDS[@]}" >"$PID_FILE"
   trap 'echo; info "Shutting down backend and frontend"; stop_apps; exit 0' INT TERM
 
   info "Waiting for backend"
