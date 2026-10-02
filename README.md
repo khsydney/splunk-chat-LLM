@@ -199,6 +199,6 @@ TypeSafe key), then *Evaluators → New decision model evaluator* following `scr
 
 **FastAPI Backend** → http://localhost:8000
 
-**Streamlit UI** → http://localhost:8501
+**Streamlit UI** → http://localhost:8502
 
 
