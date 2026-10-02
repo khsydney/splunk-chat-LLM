@@ -152,7 +152,9 @@ Embeds every document in `data/docs` and loads it into the Milvus `rag_chunks` c
 | `./run.sh status` | Show container and app status |
 | `./run.sh stop` | Stop backend, frontend and all containers (data is kept) |
 
-Optional overrides: `VENV=/path/to/venv`, `BACKEND_PORT=8000`, `FRONTEND_PORT=8501`.
+Optional overrides: `VENV=/path/to/venv`, `BACKEND_PORT=8000`, `FRONTEND_PORT=8501`, `OTEL_ALT_GRPC_PORT=14317`, `OTEL_ALT_HTTP_PORT=14318`.
+
+If ports 4317/4318 are already taken by another OpenTelemetry Collector, `run.sh` starts this app's collector on 14317/14318 and sets `OTEL_EXPORTER_OTLP_ENDPOINT` for the backend and frontend so telemetry still flows through `collector.yaml`. `./run.sh stop` only stops the processes this script started.
 Logs are written to `logs/backend.log` and `logs/frontend.log`.
 
 ## 📊 Observability
@@ -214,7 +216,7 @@ Attu (Milvus Web UI)
 
 | Symptom | Fix |
 |---|---|
-| `Port 4317 is already in use — skipping otelcol` | Another OTel collector is running. Stop it, or telemetry goes to that collector instead. |
+| `Port 4317 is used by another collector — running otelcol on 14317/14318` | Not an error. Another project's collector owns 4317, so this app's collector runs side by side on 14317/14318 and the backend/frontend are pointed at it automatically. Change with `OTEL_ALT_GRPC_PORT` / `OTEL_ALT_HTTP_PORT`. |
 | `Milvus did not become healthy` | `docker logs milvus-standalone`; first start can take ~90s. |
 | `Port 8000/8501 is in use` | `./run.sh stop`, or set `BACKEND_PORT` / `FRONTEND_PORT`. |
 | `Project "<name>" not found` (Galileo) | Create the project in the Galileo UI first, or fix `GALILEO_PROJECT`. |
