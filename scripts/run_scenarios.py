@@ -1,6 +1,6 @@
 """Fire a fixed scenario set at the running chatbot so both consoles fill with comparable traces.
 
-    python scripts/run_scenarios.py [--url http://localhost:8000] [--repeat 1]
+    python scripts/run_scenarios.py [--url http://localhost:8100] [--repeat 1]
 
 Each scenario gives a specific evaluator something to catch (knowledge base =
 the SPF vendor proposals, the Monopoly rules and the Korean AI reports):
@@ -46,7 +46,7 @@ SCENARIOS: list[tuple[str, list[str]]] = [
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="http://localhost:8000")
+    ap.add_argument("--url", default="http://localhost:8100")
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--user", default="nick-demo")
     args = ap.parse_args()
