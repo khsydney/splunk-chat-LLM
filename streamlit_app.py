@@ -78,7 +78,12 @@ if "messages" not in st.session_state:
 # render history
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+        if m.get("audio"):
+            st.audio(m["audio"], format=m.get("audio_mime", "audio/wav"))
+        if m.get("image"):
+            st.image(m["image"], width=240)
+        if m.get("content"):
+            st.markdown(m["content"])
 
 # --- Helper: stream from backend ---------------------------------------------
 def stream_from_backend(question: str):
@@ -89,6 +94,76 @@ def stream_from_backend(question: str):
         for chunk in resp.iter_text():
             if chunk:
                 yield chunk
+
+def stream_multimodal(question: str, audio_bytes: bytes | None, audio_mime: str,
+                      image_bytes: bytes | None, image_mime: str, image_name: str):
+    """POST /chat/multimodal (multipart) — voice and/or image + optional text."""
+    url = api_base.rstrip("/") + "/chat/multimodal"
+    files = {}
+    if audio_bytes:
+        files["audio"] = ("recording." + ("wav" if "wav" in audio_mime else "mp3"), audio_bytes, audio_mime)
+    if image_bytes:
+        files["image"] = (image_name or "image.png", image_bytes, image_mime)
+    data = {"question": question or "", "session_id": st.session_state.sid}
+    with httpx.stream("POST", url, data=data, files=files, timeout=None) as resp:
+        resp.raise_for_status()
+        for chunk in resp.iter_text():
+            if chunk:
+                yield chunk
+
+# --- Voice & image input (multimodal) -----------------------------------------
+# Galileo logs these as attachments on the trace: audio shows as a waveform player,
+# images render inline (docs.galileo.ai/concepts/logging/multimodal-observability).
+if "mm_nonce" not in st.session_state:
+    st.session_state.mm_nonce = 0   # bump to reset the widgets after a send
+
+with st.expander("🎤 Voice & 🖼️ image (multimodal)", expanded=False):
+    c1, c2 = st.columns(2)
+    with c1:
+        if hasattr(st, "audio_input"):
+            voice = st.audio_input("Record your question", key=f"voice_{st.session_state.mm_nonce}")
+        else:
+            voice = None
+            st.caption("Upgrade Streamlit (>=1.39) for the microphone recorder.")
+    with c2:
+        img = st.file_uploader("Attach an image (png / jpg)", type=["png", "jpg", "jpeg"],
+                               key=f"img_{st.session_state.mm_nonce}")
+    mm_text = st.text_input("Optional text to go with it", key=f"mmtext_{st.session_state.mm_nonce}",
+                            placeholder="e.g. What does this screenshot show?")
+    send_mm = st.button("Send voice / image", type="primary",
+                        disabled=not (voice or img), key=f"send_{st.session_state.mm_nonce}")
+
+if send_mm and (voice or img):
+    audio_bytes = voice.getvalue() if voice else None
+    audio_mime  = (getattr(voice, "type", None) or "audio/wav") if voice else ""
+    image_bytes = img.getvalue() if img else None
+    image_mime  = (getattr(img, "type", None) or "image/png") if img else ""
+    image_name  = img.name if img else ""
+
+    user_msg = {"role": "user", "content": mm_text or ""}
+    if audio_bytes:
+        user_msg["audio"] = audio_bytes; user_msg["audio_mime"] = audio_mime
+    if image_bytes:
+        user_msg["image"] = image_bytes
+    st.session_state.messages.append(user_msg)
+    with st.chat_message("user"):
+        if audio_bytes: st.audio(audio_bytes, format=audio_mime)
+        if image_bytes: st.image(image_bytes, width=240)
+        if mm_text: st.markdown(mm_text)
+
+    with st.chat_message("assistant"):
+        t0 = time.time()
+        try:
+            final = st.write_stream(stream_multimodal(mm_text, audio_bytes, audio_mime,
+                                                     image_bytes, image_mime, image_name))
+        except Exception as e:
+            st.error(f"Request failed: {e}")
+            final = f"_Error: {e}_"
+        st.caption(f"Response time: {time.time() - t0:.2f}s")
+
+    st.session_state.messages.append({"role": "assistant", "content": final})
+    st.session_state.mm_nonce += 1   # clear recorder / uploader for the next turn
+    st.rerun()
 
 # --- Chat input ---------------------------------------------------------------
 prompt = st.chat_input("Ask a question…")

@@ -16,7 +16,7 @@ if not any(type(h) is logging.StreamHandler for h in _root.handlers):
     _root.addHandler(_sh)
 _root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from opentelemetry import trace, metrics
 from opentelemetry.sdk.trace import SpanProcessor
 from fastapi.middleware.cors import CORSMiddleware
@@ -87,6 +87,51 @@ async def chat(req: Ask):
 
     return StreamingResponse(token_stream(), media_type="text/plain")
 
+
+@app.post("/chat/multimodal")
+async def chat_multimodal(
+    question: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    audio: Optional[UploadFile] = File(None),
+    image: Optional[UploadFile] = File(None),
+):
+    """Voice + image variant of /chat (multipart/form-data).
+
+    - `audio`  : wav or mp3 recording → transcribed, transcript becomes the question
+    - `image`  : png or jpeg → described by a vision model, description is added to the question
+    - `question`: optional typed text (can be combined with either attachment)
+
+    Both attachments are logged to Galileo as multimodal content on the trace input, so they
+    render inline in the Log stream (waveform player / image preview) and can be scored by
+    audio/image evaluators. See docs.galileo.ai/concepts/logging/multimodal-observability.
+    """
+    prompt = (question or "").strip()
+    sid = (session_id or "default").strip() or "default"
+
+    media: dict = {}
+    if audio is not None:
+        data = await audio.read()
+        if data:
+            media["audio"] = {"bytes": data, "mime": audio.content_type or "audio/wav",
+                              "filename": audio.filename or "recording.wav"}
+    if image is not None:
+        data = await image.read()
+        if data:
+            media["image"] = {"bytes": data, "mime": image.content_type or "image/png",
+                              "filename": image.filename or "image.png"}
+
+    if not prompt and not media:
+        raise HTTPException(status_code=400, detail="Provide 'question', 'audio' or 'image'")
+
+    async def token_stream():
+        try:
+            async for chunk in rag_stream(prompt, session_id=sid, media=media or None):
+                yield chunk if isinstance(chunk, str) else str(chunk)
+        except Exception as e:
+            yield f"\n[stream-error] {e}\n"
+
+    return StreamingResponse(token_stream(), media_type="text/plain")
+
 @app.on_event("startup")
 async def setup_telemetry():
     tp = trace.get_tracer_provider()
@@ -139,6 +184,15 @@ async def setup_telemetry():
             GalileoScorers.output_toxicity_luna,
             GalileoScorers.prompt_injection_luna,
         ]
+        # Opt-in extras (e.g. multimodal audio/image scorers). These need a model
+        # integration configured in the Galileo console (Gemini for audio, GPT-5+ for
+        # images); a scorer the tenant can't run fails the WHOLE upsert, hence opt-in.
+        _extra = [m.strip() for m in os.getenv("GALILEO_EXTRA_METRICS", "").split(",") if m.strip()]
+        for _name in _extra:
+            try:
+                wanted.append(GalileoScorers(_name))
+            except ValueError:
+                _mlog.error("GALILEO_EXTRA_METRICS: unknown scorer %r — skipped", _name)
 
         from galileo.log_stream import LogStream
         _ls = LogStream.get(name=log_stream_name, project_name=project_name)
