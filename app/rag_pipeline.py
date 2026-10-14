@@ -20,6 +20,7 @@ from opentelemetry.util.genai.handler import get_telemetry_handler
 _genai_handler = get_telemetry_handler()
 
 from galileo import GalileoLogger
+from galileo.schema.content_blocks import TextContentBlock, DataContentBlock
 from agent_control import control, ControlViolationError, ControlSteerError
 
 _galileo: GalileoLogger | None = None
@@ -306,19 +307,134 @@ llm_chain_stream_with_mem = RunnableWithMessageHistory(
     history_messages_key="history"
 )
 
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Multimodal helpers (voice + image)  — see docs.galileo.ai/concepts/logging/multimodal-observability
+# ────────────────────────────────────────────────────────────────────────────────
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "whisper-1")       # speech → text
+VISION_MODEL     = os.getenv("VISION_MODEL", CHAT_MODEL)            # image → text description
+
+# Galileo renders audio as an inline waveform player and images inline in the Log
+# stream, but only for these formats (mp3/wav, png/jpeg). Anything else is logged as
+# text-only so the trace still works.
+_GALILEO_AUDIO_MIME = {"audio/wav", "audio/x-wav", "audio/wave", "audio/mpeg", "audio/mp3"}
+_GALILEO_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg"}
+
+_openai_async = None
+def _get_openai():
+    global _openai_async
+    if _openai_async is None:
+        from openai import AsyncOpenAI
+        _openai_async = AsyncOpenAI()
+    return _openai_async
+
+
+def _normalize_mime(mime: str, kind: str) -> str:
+    mime = (mime or "").lower().split(";")[0].strip()
+    if kind == "audio":
+        if mime in ("audio/x-wav", "audio/wave"): return "audio/wav"
+        if mime == "audio/mp3": return "audio/mpeg"
+    if kind == "image" and mime == "image/jpg":
+        return "image/jpeg"
+    return mime
+
+
+def build_trace_input(question: str, media: dict | None):
+    """Trace input for Galileo: plain string when text-only, content blocks when media present.
+
+    `media` = {"audio": {"bytes": b"...", "mime": "audio/wav", "filename": "..."},
+               "image": {"bytes": b"...", "mime": "image/png", "filename": "..."}}
+    """
+    import base64
+    if not media:
+        return question
+    blocks = [TextContentBlock(text=question or "(voice question — see audio)")]
+    a = media.get("audio")
+    if a and a.get("bytes"):
+        mime = _normalize_mime(a.get("mime", ""), "audio")
+        if mime in _GALILEO_AUDIO_MIME:
+            blocks.append(DataContentBlock(modality="audio", mime_type=mime,
+                                           base64=base64.b64encode(a["bytes"]).decode()))
+    i = media.get("image")
+    if i and i.get("bytes"):
+        mime = _normalize_mime(i.get("mime", ""), "image")
+        if mime in _GALILEO_IMAGE_MIME:
+            blocks.append(DataContentBlock(modality="image", mime_type=mime,
+                                           base64=base64.b64encode(i["bytes"]).decode()))
+    return blocks
+
+
+async def _transcribe_audio(audio: dict) -> str:
+    """Speech-to-text with OpenAI (whisper-1 by default)."""
+    import io
+    client = _get_openai()
+    buf = io.BytesIO(audio["bytes"])
+    buf.name = audio.get("filename") or ("recording.wav" if "wav" in (audio.get("mime") or "") else "recording.mp3")
+    resp = await client.audio.transcriptions.create(model=TRANSCRIBE_MODEL, file=buf)
+    return (getattr(resp, "text", None) or str(resp)).strip()
+
+
+async def _describe_image(image: dict, question: str, usage_sink: dict | None = None) -> str:
+    """Image → short text description with a vision-capable chat model.
+
+    The description is what the RAG pipeline can actually search with (embeddings +
+    Milvus are text-only), so this step turns the picture into retrievable text.
+    """
+    import base64
+    client = _get_openai()
+    mime = _normalize_mime(image.get("mime", ""), "image") or "image/png"
+    data_url = f"data:{mime};base64,{base64.b64encode(image['bytes']).decode()}"
+    ask = question or "What is in this image?"
+    resp = await client.chat.completions.create(
+        model=VISION_MODEL,
+        temperature=0,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text":
+                    "Describe this image in 2-4 sentences, focusing on anything useful to answer "
+                    f"the user's question: \"{ask}\". Include any visible text verbatim."},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }],
+    )
+    if usage_sink is not None and getattr(resp, "usage", None):
+        usage_sink["input_tokens"]  = resp.usage.prompt_tokens
+        usage_sink["output_tokens"] = resp.usage.completion_tokens
+        usage_sink["total_tokens"]  = resp.usage.total_tokens
+    return (resp.choices[0].message.content or "").strip()
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Streaming entry point
 # ────────────────────────────────────────────────────────────────────────────────
-async def stream_generate(question: str, session_id: str = "default") -> AsyncGenerator[str, None]:
+async def stream_generate(question: str, session_id: str = "default",
+                          media: dict | None = None) -> AsyncGenerator[str, None]:
+    """Stream an answer. `media` (optional) carries a voice recording and/or an image —
+    see build_trace_input() for the shape. Both are logged to Galileo as attachments on
+    the trace input, so they render inline (waveform player / image) in the Log stream.
+    """
     import time as _time
     g = _get_galileo()
+    _has_audio = bool(media and media.get("audio", {}).get("bytes"))
+    _has_image = bool(media and media.get("image", {}).get("bytes"))
+    _step = 0
+    def _next_step() -> int:
+        nonlocal _step
+        _step += 1
+        return _step
     if g:
         _ensure_session(g, session_id)
-        g.start_trace(input=question, name="rag-pipeline", metadata={"session_id": session_id})
+        g.start_trace(
+            input=build_trace_input(question, media),
+            name="rag-pipeline",
+            metadata={"session_id": session_id,
+                      "modality": "+".join(m for m, on in (("text", bool(question)), ("audio", _has_audio),
+                                                            ("image", _has_image)) if on) or "text"},
+        )
         # Push a workflow span so every span below nests under it instead of sitting
         # flat on the trace. Popped by conclude(conclude_all=True) in the finally block.
         g.add_workflow_span(
-            input=question,
+            input=question or "(voice question)",
             name="rag-pipeline",
             metadata={"session_id": session_id, "retrieval_top_k": str(retrieval_TOP_K),
                       "rerank_top_k": str(rerank_TOP_K)},
@@ -344,6 +460,60 @@ async def stream_generate(question: str, session_id: str = "default") -> AsyncGe
     try:
         if getattr(workflow, "span", None) is not None:
             _wf_token = otel_context.attach(trace.set_span_in_context(workflow.span))
+
+        # 0a. Voice: speech-to-text. The transcript BECOMES the question for the rest
+        #     of the pipeline. Logged as a tool span so the Agent graph shows the hop.
+        if _has_audio:
+            _t0 = _time.monotonic_ns()
+            transcript = await _transcribe_audio(media["audio"])
+            if g:
+                g.add_tool_span(
+                    input=f"transcribe {len(media['audio']['bytes'])} bytes of {media['audio'].get('mime') or 'audio'}",
+                    output=transcript,
+                    name="speech-to-text",
+                    step_number=_next_step(),
+                    duration_ns=_time.monotonic_ns() - _t0,
+                    metadata={"stage": "stt", "model": TRANSCRIBE_MODEL,
+                              "audio_bytes": str(len(media["audio"]["bytes"]))},
+                )
+            # Show the user what we heard, but keep it OUT of `buf` so the Galileo
+            # trace output stays the clean answer.
+            yield f"> 🎤 **You said:** {transcript}\n\n"
+            question = f"{question}\n{transcript}".strip() if question else transcript
+
+        # 0b. Image: vision model turns the picture into text the retriever can use.
+        #     Logged as an LLM span (it is a real model call with tokens).
+        if _has_image:
+            _img_usage: dict = {}
+            _t0 = _time.monotonic_ns()
+            description = await _describe_image(media["image"], question, _img_usage)
+            if g:
+                g.add_llm_span(
+                    input=[{"role": "user", "content":
+                            f"[image: {media['image'].get('filename') or 'attachment'} "
+                            f"({media['image'].get('mime') or 'image'})] Describe for question: {question or '(none)'}"}],
+                    output={"role": "assistant", "content": description},
+                    model=VISION_MODEL,
+                    temperature=0,
+                    name="image-understanding",
+                    step_number=_next_step(),
+                    duration_ns=_time.monotonic_ns() - _t0,
+                    num_input_tokens=_img_usage.get("input_tokens"),
+                    num_output_tokens=_img_usage.get("output_tokens"),
+                    total_tokens=_img_usage.get("total_tokens"),
+                    metadata={"stage": "vision", "image_bytes": str(len(media["image"]["bytes"]))},
+                )
+            yield f"> 🖼️ **Image understood as:** {description}\n\n"
+            question = (f"{question}\n\n[Attached image shows: {description}]" if question
+                        else f"What does this show? [Attached image shows: {description}]")
+
+        if not question:
+            msg = "I didn't get a question — please type one, record your voice, or attach an image."
+            if g:
+                g.conclude(output=msg, conclude_all=True)
+                await g.async_flush()
+            yield msg
+            return
 
         # 1. Milvus retrieval
         retrieval = RetrievalInvocation(
@@ -379,7 +549,7 @@ async def stream_generate(question: str, session_id: str = "default") -> AsyncGe
                 input=question,
                 output=[d.page_content for d in raw["docs"]],
                 name="milvus-raw",
-                step_number=1,
+                step_number=_next_step(),
                 duration_ns=_time.monotonic_ns() - _t0,
                 metadata={"stage": "retrieval", "top_k": str(retrieval_TOP_K),
                           "num_retrieved": str(len(raw["docs"]))},
@@ -401,7 +571,7 @@ async def stream_generate(question: str, session_id: str = "default") -> AsyncGe
                 input=f"rerank {len(raw['docs'])} candidates for: {question}",
                 output=f"kept top {len(reranked['docs'])} of {len(raw['docs'])}",
                 name="bge-reranker-v2-m3",
-                step_number=2,
+                step_number=_next_step(),
                 duration_ns=_rerank_ns,
                 metadata={"stage": "rerank", "model": "BAAI/bge-reranker-v2-m3",
                           "num_in": str(len(raw["docs"])), "num_out": str(len(reranked["docs"]))},
@@ -414,7 +584,7 @@ async def stream_generate(question: str, session_id: str = "default") -> AsyncGe
                 input=question,
                 output=[d.page_content for d in reranked["docs"]],
                 name="milvus-reranked",
-                step_number=3,
+                step_number=_next_step(),
                 metadata={"stage": "rerank-output",
                           "num_retrieved": str(len(raw["docs"])), "num_reranked": str(len(reranked["docs"]))},
             )
@@ -437,7 +607,7 @@ async def stream_generate(question: str, session_id: str = "default") -> AsyncGe
                 input=f"format {len(reranked['docs'])} documents into prompt context",
                 output=f"{len(_retrieved_context)} chars of context",
                 name="prompt-augmentation",
-                step_number=4,
+                step_number=_next_step(),
                 duration_ns=_aug_ns,
                 metadata={"stage": "augment", "num_docs": str(len(reranked["docs"])),
                           "context_chars": str(len(_retrieved_context))},
@@ -517,7 +687,7 @@ async def stream_generate(question: str, session_id: str = "default") -> AsyncGe
                 # step_number is the "topological step number" the Agent graph builds
                 # edges from. Left unset, every span serializes as 0 and the graph can
                 # only guess — the llm node ends up floating with no incoming arrow.
-                step_number=5,
+                step_number=_next_step(),
                 duration_ns=duration_ns,
                 num_input_tokens=_usage.get("input_tokens"),
                 num_output_tokens=_usage.get("output_tokens"),

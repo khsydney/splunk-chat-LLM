@@ -4,6 +4,8 @@ uvicorn[standard]
 pydantic-settings
 httpx
 python-dotenv
+python-multipart   # FastAPI Form/File uploads (/chat/multimodal)
+openai
 langchain
 langchain-openai
 langchain-community
@@ -24,7 +26,7 @@ requests
 certifi
 
 # --- Galileo (LLM logging + Agent Control guardrails) ---
-galileo
+galileo>=2.6.0      # >=2.6 for multimodal content blocks (audio/image attachments)
 galileo-core
 agent-control-sdk
 agent-control-evaluator-galileo

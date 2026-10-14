@@ -29,9 +29,10 @@ It integrates with:
 4. [run.sh Command Reference](#-runsh-command-reference)
 5. [Observability](#-observability)
 6. [Galileo & Agent Control](#-galileo--agent-control)
-7. [Components](#-components)
-8. [Troubleshooting](#-troubleshooting)
-9. [Notes](#-notes)
+7. [Voice & Image (Multimodal)](#-voice--image-multimodal)
+8. [Components](#-components)
+9. [Troubleshooting](#-troubleshooting)
+10. [Notes](#-notes)
 
 ---
 
@@ -180,6 +181,34 @@ This enables:
 - a **steer** control returns guidance instead of the LLM answer (`ControlSteerError`)
 
 Galileo runs alongside Splunk — OpenTelemetry traces still go to Splunk through the collector.
+
+## 🎤 Voice & Image (Multimodal)
+
+The chat accepts a **voice recording** and/or an **image** in addition to typed text, and logs them to Galileo as multimodal content — the audio shows up as an inline waveform player and the image renders inline in the Log stream, so you can inspect exactly what the model received (see [Galileo multimodal observability](https://docs.galileo.ai/concepts/logging/multimodal-observability)).
+
+**How to use it:** in the Streamlit UI open the **"🎤 Voice & 🖼️ image (multimodal)"** panel above the chat box, record a question with the microphone and/or attach a `png`/`jpg`, optionally type some text, then click **Send voice / image**.
+
+**How a multimodal turn flows**
+
+```
+Streamlit  ──multipart──▶  FastAPI  POST /chat/multimodal
+                               │
+                               ├─ start_trace(input=[Text, Data(audio), Data(image)])   ← attachments logged here
+                               ├─ speech-to-text   (tool span,  whisper-1)      transcript  → becomes the question
+                               ├─ image-understanding (LLM span, gpt-4o-mini)  description → appended to the question
+                               ├─ milvus-raw → bge-reranker → milvus-reranked → prompt-augmentation   (unchanged)
+                               └─ openai-chat (LLM span) → conclude → flush
+```
+
+| Input | Accepted formats | What happens to it |
+|---|---|---|
+| Voice | `wav` (Streamlit recorder), `mp3` | Transcribed with `TRANSCRIBE_MODEL`; the transcript is used as the question and echoed back to the user (`🎤 You said: …`) |
+| Image | `png`, `jpeg` | Described with `VISION_MODEL`; the description is added to the question so retrieval can search for it (`🖼️ Image understood as: …`) |
+| Text | — | Optional; combined with either attachment |
+
+**Scoring multimodal content in Galileo.** Out-of-the-box multimodal metrics (`interruption_detection`, `visual_quality`, `*_audio` variants) and custom LLM-as-a-judge metrics with the *Audio* or *Image/PDF* capability need a model integration first (Gemini for audio, GPT-5+ for images). Once configured in the console, enable them at startup with `GALILEO_EXTRA_METRICS=interruption_detection,visual_quality` in `.env`. They return N/A on traces without a matching attachment.
+
+> Note: Galileo multimodal attachments are only supported via `GalileoLogger` (what this app uses), not via the OpenTelemetry path — so the Splunk/OTel trace for the same request stays text-only.
 
 ## 🧩 Components
 
