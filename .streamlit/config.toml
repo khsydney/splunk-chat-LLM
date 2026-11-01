@@ -1,0 +1,22 @@
+# Warm paper look: paper background, clay accent, quiet borders.
+[theme]
+base = "light"
+primaryColor = "#C96442"
+backgroundColor = "#FAF9F5"
+secondaryBackgroundColor = "#F0EEE6"
+textColor = "#1F1E1D"
+borderColor = "#E3E1D8"
+linkColor = "#C96442"
+codeTextColor = "#B4532F"
+codeBackgroundColor = "#F0EEE6"
+baseRadius = "0.75rem"
+buttonRadius = "0.6rem"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.sidebar]
+backgroundColor = "#F5F4EE"
+secondaryBackgroundColor = "#ECEAE2"
+
+[client]
+toolbarMode = "minimal"
