@@ -5,3 +5,8 @@ docker/volumes/
 # run.sh output
 logs/
 !.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc

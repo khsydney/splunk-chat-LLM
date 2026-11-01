@@ -1,0 +1,7 @@
+# MinIO images are no longer published, so on the server Milvus keeps its
+# segment data and Woodpecker WAL on local disk under /var/lib/milvus.
+common:
+  storageType: local
+woodpecker:
+  storage:
+    type: local

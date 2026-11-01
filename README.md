@@ -2,7 +2,7 @@
 
 <img width="100%" alt="architecture diagram" src="https://github.com/user-attachments/assets/aa83730f-da05-48a4-87d7-327612111d6a" />
 
-This branch (**Chat-LLM-Galileo**) contains the **high-level architecture and setup** for a **chat application** that leverages **RAG (Retrieval-Augmented Generation)** with **OpenAI**, with **Galileo** logging and **Agent Control** guardrails added on top of the Splunk observability stack.
+This branch (**Chat-LLM-Galileo-Multimodal**) contains the **high-level architecture and setup** for a **chat application** that leverages **RAG (Retrieval-Augmented Generation)** with **OpenAI**, with **Galileo** logging and **Agent Control** guardrails added on top of the Splunk observability stack. On top of typed questions it accepts **voice and image input**, and its Streamlit UI has a warm paper theme.
 
 It integrates with:
 - **Milvus (Vector Database)** for embeddings storage
@@ -30,9 +30,11 @@ It integrates with:
 5. [Observability](#-observability)
 6. [Galileo & Agent Control](#-galileo--agent-control)
 7. [Voice & Image (Multimodal)](#-voice--image-multimodal)
-8. [Components](#-components)
-9. [Troubleshooting](#-troubleshooting)
-10. [Notes](#-notes)
+8. [Chat UI](#-chat-ui)
+9. [Deploy on EC2](#-deploy-on-ec2)
+10. [Components](#-components)
+11. [Troubleshooting](#-troubleshooting)
+12. [Notes](#-notes)
 
 ---
 
@@ -41,7 +43,7 @@ It integrates with:
 Prerequisites: **Docker Desktop** running, **Python 3.11+**, an **OpenAI API key**, and a **Galileo API key**.
 
 ```bash
-git clone -b Chat-LLM-Galileo https://github.com/khsydney/splunk-chat-LLM.git
+git clone -b Chat-LLM-Galileo-Multimodal https://github.com/khsydney/splunk-chat-LLM.git
 cd splunk-chat-LLM
 
 python3 -m venv .venv && source .venv/bin/activate
@@ -92,6 +94,19 @@ GALILEO_LOG_STREAM=production
 AGENT_CONTROL_URL=<Agent Control server URL>
 ```
 The Splunk Observability Cloud ingest token and endpoints are configured in `collector.yaml` (`exporters.otlphttp/splunk`).
+
+Optional settings:
+```bash
+TORCH_DEVICE=cpu            # device for the embedding model and reranker (default cpu, see Troubleshooting)
+UI_USER_NAME=nick           # name shown in the UI greeting and sidebar
+HF_HUB_OFFLINE=1            # skip Hugging Face Hub checks once the models are downloaded
+```
+
+**Behind a TLS-inspecting proxy** (for example Cisco Secure Access), Python can't verify OpenAI, Hugging Face or Galileo, because its `certifi` bundle doesn't include the proxy's root certificate. Point Python at a bundle that does. Homebrew's bundle includes the macOS keychain roots:
+```bash
+SSL_CERT_FILE=/opt/homebrew/etc/ca-certificates/cert.pem
+REQUESTS_CA_BUNDLE=/opt/homebrew/etc/ca-certificates/cert.pem
+```
 
 ### 4. Run required Docker containers
 All of these are started by `./run.sh infra`.
@@ -186,7 +201,7 @@ Galileo runs alongside Splunk — OpenTelemetry traces still go to Splunk throug
 
 The chat accepts a **voice recording** and/or an **image** in addition to typed text, and logs them to Galileo as multimodal content — the audio shows up as an inline waveform player and the image renders inline in the Log stream, so you can inspect exactly what the model received (see [Galileo multimodal observability](https://docs.galileo.ai/concepts/logging/multimodal-observability)).
 
-**How to use it:** in the Streamlit UI open the **"🎤 Voice & 🖼️ image (multimodal)"** panel above the chat box, record a question with the microphone and/or attach a `png`/`jpg`, optionally type some text, then click **Send voice / image**.
+**How to use it:** in the reply box at the bottom of the Streamlit UI, click **＋** to attach a `png`/`jpg` and/or the **microphone** to record a question, optionally type some text, then send. Text-only messages go to `POST /chat`; anything with an attachment goes to `POST /chat/multimodal`.
 
 **How a multimodal turn flows**
 
@@ -209,6 +224,49 @@ Streamlit  ──multipart──▶  FastAPI  POST /chat/multimodal
 **Scoring multimodal content in Galileo.** Out-of-the-box multimodal metrics (`interruption_detection`, `visual_quality`, `*_audio` variants) and custom LLM-as-a-judge metrics with the *Audio* or *Image/PDF* capability need a model integration first (Gemini for audio, GPT-5+ for images). Once configured in the console, enable them at startup with `GALILEO_EXTRA_METRICS=interruption_detection,visual_quality` in `.env`. They return N/A on traces without a matching attachment.
 
 > Note: Galileo multimodal attachments are only supported via `GalileoLogger` (what this app uses), not via the OpenTelemetry path — so the Splunk/OTel trace for the same request stays text-only.
+
+## 💬 Chat UI
+
+`streamlit_app.py` has its own styling. The theme (paper background, clay accent) lives in `.streamlit/config.toml`; layout and fonts are CSS inside the app.
+
+- **Sidebar** — **New chat**, a chat search box, and **Recents**. Each chat has its own backend `session_id`, so it keeps its own Redis memory and Galileo session. The **Knowledge base** section uploads documents to `data/docs` and rebuilds the index; **Settings** holds the backend URL, a backend check, a side-panel toggle and **Clear this chat**.
+- **Conversation** — your messages appear as bubbles on the right, answers as serif text with the response time and model underneath. A pulsing indicator shows while a request is in flight. Bracketed citations in an answer are listed under it as **Sources**.
+- **Welcome screen** — a greeting with suggested questions about the indexed documents.
+- **Reply box** — text, **＋** for an image and a **microphone** for voice.
+- **Side card** — lists the documents in `data/docs` and what the session uses (Milvus collection, Redis memory turns, chat model). Hidden on windows narrower than 1300px.
+
+## ☁️ Deploy on EC2
+
+The `deploy/` folder runs the app on one Ubuntu 24.04 instance. It differs from `./run.sh` on a laptop in these ways:
+
+| | Laptop (`run.sh`) | EC2 (`deploy/`) |
+|---|---|---|
+| Milvus storage | MinIO (`docker/milvus-compose.yaml`) | Local disk (`deploy/milvus-compose.yaml`), because MinIO images are no longer published |
+| Python packages | `requirements.txt` | `requirements.lock.txt`, the exact versions tested, with CPU-only torch |
+| Processes | Foreground script | systemd units that restart on failure and start at boot |
+| Public access | `localhost` only | nginx on 80/443. Every other port is bound to loopback |
+| TLS | None | Let's Encrypt IP certificate. Browsers only allow the microphone on HTTPS pages |
+
+**1. Launch the instance.** Recommended: `m7i.2xlarge` (8 vCPUs), 100 GB gp3 disk. Four people asking at once takes answers to about 60-75 s, against 10-14 s for one. Open 80 and 443 to your users, and 22 to your own IP. Port 80 must stay reachable by Let's Encrypt for certificate renewal. Use `deploy/user-data.sh` as user data, replacing `__SSH_PUBLIC_KEY__` and `__BRANCH__`. The branch must already be pushed, because the instance clones it from GitHub. Setup is finished when `/var/lib/chat-llm-setup.done` exists; its log is `/var/log/chat-llm-setup.log`.
+
+**2. Copy the settings and start the app.** `push-env.sh` leaves out the Mac-only proxy certificate paths and turns off offline model loading.
+```bash
+deploy/push-env.sh <public-ip>
+ssh -i ~/.ssh/chat-llm-key.pem ubuntu@<public-ip> '~/splunk-chat-LLM/deploy/first-start.sh <public-ip>'
+```
+`first-start.sh` starts the containers, builds the index if it's empty, starts both apps, enables HTTPS and asks a test question. Then open `https://<public-ip>`.
+
+**Day to day:**
+```bash
+sudo systemctl status chat-llm-backend chat-llm-frontend chat-llm-infra
+journalctl -u chat-llm-backend -f
+git pull && sudo systemctl restart chat-llm-backend chat-llm-frontend    # deploy a change
+```
+Redis Insight and Attu are only on loopback, so reach them with an SSH tunnel, for example `ssh -L 8001:localhost:8001 ubuntu@<public-ip>`.
+
+> **The app has no login.** Anyone who can reach the URL can spend your OpenAI quota and upload documents to the index, so limit port 443 in the security group where you can.
+>
+> **The IP is tied to the certificate.** Without an Elastic IP, stopping the instance changes its address. Run `sudo deploy/enable-https.sh <new-ip>` afterwards.
 
 ## 🧩 Components
 
@@ -247,10 +305,17 @@ Attu (Milvus Web UI)
 |---|---|
 | `Port 4317 is used by another collector — running otelcol on 14317/14318` | Not an error. Another project's collector owns 4317, so this app's collector runs side by side on 14317/14318 and the backend/frontend are pointed at it automatically. Change with `OTEL_ALT_GRPC_PORT` / `OTEL_ALT_HTTP_PORT`. |
 | `Milvus did not become healthy` | `docker logs milvus-standalone`; first start can take ~90s. |
+| `docker compose` can't pull `minio/minio` on a new machine | MinIO no longer publishes its images, so `./run.sh` only works where the image is already cached. Use `deploy/milvus-compose.yaml`, which stores Milvus data on local disk. |
+| `[stream-error] <MilvusException: ... Fail connecting to server on localhost:19530>` | `milvus-standalone` exited, usually after the Mac slept: it loses its etcd lease (`requested lease not found` in `docker logs milvus-standalone`). The compose file restarts it automatically (`restart: unless-stopped`) and the backend reconnects and retries for ~20s, so the next question normally works. If it doesn't, run `docker start milvus-standalone`. |
+| Backend dies with `failed assertion _status < MTLCommandBufferStatusCommitted` | PyTorch on the Mac GPU (MPS) can't be used by two threads at once. Keep `TORCH_DEVICE=cpu` (the default). |
+| `CERTIFICATE_VERIFY_FAILED` in the backend log | A TLS-inspecting proxy is re-signing HTTPS. Set `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` (see [Configure .env](#3-configure-the-env-file)). |
+| `ImportError: cannot import name 'httpx' from 'huggingface_hub.utils'` | `huggingface_hub` got downgraded below what `datasets` needs: `pip install "huggingface_hub>=1.31,<2"`. |
 | `Port 8000/8501 is in use` | `./run.sh stop`, or set `BACKEND_PORT` / `FRONTEND_PORT`. |
-| `Project "<name>" not found` (Galileo) | Create the project in the Galileo UI first, or fix `GALILEO_PROJECT`. |
+| `Project "<name>" not found` (Galileo) | Create the project in the Galileo UI first, or fix `GALILEO_PROJECT`. If it's followed by `422 ... already exists`, the project exists but `GALILEO_API_KEY` belongs to a user who can't see it — use a key from the project's owner. |
+| `401 Unauthorized` from Agent Control | The key isn't allowed to use Agent Control. The app logs it, skips the guardrails and keeps answering. |
 | `429 insufficient_quota` | The OpenAI account has no credits — add billing or use another key. |
 | Chat answers are empty / no sources | Run `./run.sh index` to build the Milvus collection. |
+| `/health` is OK but answers fail | `/health` doesn't touch Milvus or OpenAI, and `/chat` reports failures as `[stream-error] ...` inside a 200 response. Ask a real question to check. |
 
 ## 📌 Notes
 
@@ -258,7 +323,7 @@ Attu (Milvus Web UI)
 
 **FastAPI Backend** → http://localhost:8000 (Swagger: http://localhost:8000/docs)
 
-**Attu UI** → http://localhost:8001 (connect to `milvus-standalone:19530`)
+**Attu UI** → http://localhost:8001 (connect to `milvus-standalone:19530`). If an `attu` container already runs from another clone, use its port instead; `./run.sh` prints the real one.
 
 **Redis Insight UI** → http://localhost:5540
 

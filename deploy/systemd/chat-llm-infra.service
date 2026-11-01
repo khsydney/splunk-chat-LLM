@@ -1,0 +1,15 @@
+[Unit]
+Description=Chat-LLM containers (OTel collector, Milvus, Redis, Attu)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=ubuntu
+ExecStart=/home/ubuntu/splunk-chat-LLM/deploy/start-infra.sh
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

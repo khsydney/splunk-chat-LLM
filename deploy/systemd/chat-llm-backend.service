@@ -1,0 +1,13 @@
+[Unit]
+Description=Chat-LLM backend
+After=chat-llm-infra.service
+Requires=chat-llm-infra.service
+
+[Service]
+User=ubuntu
+ExecStart=/home/ubuntu/splunk-chat-LLM/deploy/start-backend.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

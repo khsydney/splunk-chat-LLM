@@ -1,0 +1,13 @@
+[Unit]
+Description=Chat-LLM frontend
+After=chat-llm-infra.service
+Requires=chat-llm-infra.service
+
+[Service]
+User=ubuntu
+ExecStart=/home/ubuntu/splunk-chat-LLM/deploy/start-frontend.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
