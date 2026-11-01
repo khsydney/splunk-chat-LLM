@@ -247,7 +247,7 @@ The `deploy/` folder runs the app on one Ubuntu 24.04 instance. It differs from 
 | Public access | `localhost` only | nginx on 80/443. Every other port is bound to loopback |
 | TLS | None | Let's Encrypt IP certificate. Browsers only allow the microphone on HTTPS pages |
 
-**1. Launch the instance.** Recommended: `m7i.2xlarge` (8 vCPUs), 100 GB gp3 disk. Four people asking at once takes answers to about 60-75 s, against 10-14 s for one. Open 80 and 443 to your users, and 22 to your own IP. Port 80 must stay reachable by Let's Encrypt for certificate renewal. Use `deploy/user-data.sh` as user data, replacing `__SSH_PUBLIC_KEY__` and `__BRANCH__`. The branch must already be pushed, because the instance clones it from GitHub. Setup is finished when `/var/lib/chat-llm-setup.done` exists; its log is `/var/log/chat-llm-setup.log`.
+**1. Launch the instance.** For one presenter, use `m7i-flex.xlarge` (4 vCPUs, 16 GB) with a 50 GB gp3 disk. For several people, use `m7i.2xlarge` (8 vCPUs, 32 GB): four people asking at once took answers to about 60-75 s there, against 10-14 s for one. Open 80 and 443 to your users, and 22 to your own IP. Port 80 must stay reachable by Let's Encrypt for certificate renewal. Use `deploy/user-data.sh` as user data, replacing `__SSH_PUBLIC_KEY__` and `__BRANCH__`. The branch must already be pushed, because the instance clones it from GitHub. Setup is finished when `/var/lib/chat-llm-setup.done` exists; its log is `/var/log/chat-llm-setup.log`.
 
 **2. Copy the settings and start the app.** `push-env.sh` leaves out the Mac-only proxy certificate paths and turns off offline model loading.
 ```bash

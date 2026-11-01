@@ -17,6 +17,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y git curl nginx docker.io docker-compose-v2 python3-venv python3-pip \
   libmagic1 poppler-utils tesseract-ocr libgl1 libglib2.0-0t64
+snap wait system seed.loaded
 snap install --classic certbot
 ln -sf /snap/bin/certbot /usr/local/bin/certbot
 
