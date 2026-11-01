@@ -1,3 +1,4 @@
+# Secrets and account IDs come from the environment: SPLUNK_ACCESS_TOKEN, APPDYNAMICS_AGENT_ACCOUNT_NAME, APPDYNAMICS_CONTROLLER_HOST_NAME, APPDYNAMICS_API_KEY
 receivers:
   otlp:
     protocols:
@@ -55,11 +56,11 @@ processors:
 
 exporters:
   # sapm:       # traces → Splunk APM
-  #   access_token: ${env:SPLUNK_ACCESS_TOKEN}
+  #   access_token: "${env:SPLUNK_ACCESS_TOKEN}"
   #   endpoint: https://ingest.us1.signalfx.com/v2/trace
 
   # signalfx:   # metrics → Splunk IM
-  #   access_token: ${env:SPLUNK_ACCESS_TOKEN}
+  #   access_token: "${env:SPLUNK_ACCESS_TOKEN}"
   #   api_url: https://api.us1.signalfx.com
   #   ingest_url: https://ingest.us1.signalfx.com
   #   sync_host_metadata: true
@@ -69,11 +70,11 @@ exporters:
     metrics_endpoint: https://ingest.us1.signalfx.com/v2/datapoint/otlp
     logs_endpoint:    https://ingest.us1.signalfx.com/v3/event
     headers:
-      X-SF-Token: ${env:SPLUNK_ACCESS_TOKEN}
+      X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"
   otlphttp:
     traces_endpoint:  https://pdx-sls-agent-api.saas.appdynamics.com
     headers:
-      x-api-key: ${env:APPDYNAMICS_API_KEY}
+      x-api-key: "${env:APPDYNAMICS_API_KEY}"
 
   # Send everything to Splunk Observability Cloud over OTLP/HTTP
   # otlphttp/splunk:
@@ -81,7 +82,7 @@ exporters:
   #   metrics_endpoint: https://ingest.us1.signalfx.com/v2/datapoint/otlp
   #   logs_endpoint: https://ingest.us1.signalfx.com/v3/event
   #   headers:
-  #     X-SF-Token: ${env:SPLUNK_ACCESS_TOKEN}       # your Splunk ingest token
+  #     X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"       # your Splunk ingest token
 
   # # Helpful during bring-up; remove later if noisy
   # logging:
