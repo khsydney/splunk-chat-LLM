@@ -48,6 +48,7 @@ AppD_API_Key=<App Dynamics Api Key>
 #### A) OpenTelemetry Collector
 ```bash
 docker run -d --name otelcol \
+  -e SPLUNK_ACCESS_TOKEN -e APPDYNAMICS_AGENT_ACCOUNT_NAME -e APPDYNAMICS_CONTROLLER_HOST_NAME \
   -p 4317:4317 -p 4318:4318 \
   -v "$PWD/collector.yaml":/etc/otelcol/config.yaml \
   otel/opentelemetry-collector-contrib:latest \
