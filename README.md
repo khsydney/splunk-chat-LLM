@@ -48,6 +48,7 @@ AppD_API_Key=<App Dynamics Api Key>
 #### A) OpenTelemetry Collector
 ```bash
 docker run -d --name otelcol \
+  -e SPLUNK_ACCESS_TOKEN -e APPDYNAMICS_AGENT_ACCOUNT_NAME -e APPDYNAMICS_CONTROLLER_HOST_NAME \
   -p 4317:4317 -p 4318:4318 \
   -v "$PWD/collector.yaml":/etc/otelcol/config.yaml \
   otel/opentelemetry-collector-contrib:latest \
@@ -189,7 +190,6 @@ TypeSafe key), then *Evaluators → New decision model evaluator* following `scr
   Context Adherence on Luna needs an on-prem/standalone tenant.
 * **Double billing**: identical spans are billed by Langfuse (units) and Splunk AO (spans / Luna tokens), plus Jev tokens.
 * **Korean**: the two Korean reports are in the KB; Jev documents CJK as "supported but tested accuracy varies" — the `korean` scenario is there to measure that.
-* `collector.yaml` should not contain a live ingest token in a shared repo — move it to an env var (`${SPLUNK_ACCESS_TOKEN}`) and rotate it.
 
 ## 📌 Notes
 
