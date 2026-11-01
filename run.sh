@@ -90,10 +90,13 @@ start_otelcol() {
     warn "Port 4317 is used by another collector — running otelcol on $grpc/$http instead."
   fi
   info "Starting OpenTelemetry Collector (ports $grpc/$http)"
+  [[ -n "${SPLUNK_ACCESS_TOKEN:-}" ]] || warn "SPLUNK_ACCESS_TOKEN is not set in .env — the collector cannot send to Splunk."
 
   if docker ps -a --format '{{.Names}}' | grep -qx otelcol; then
     if [[ "$(docker inspect -f '{{(index (index .HostConfig.PortBindings "4317/tcp") 0).HostPort}}' otelcol 2>/dev/null)" != "$grpc" ]]; then
       docker rm -f otelcol >/dev/null   # stateless; recreate with the right ports
+    elif ! docker inspect -f '{{.Config.Env}}' otelcol | grep -q 'SPLUNK_ACCESS_TOKEN='; then
+      docker rm -f otelcol >/dev/null   # created before the token moved to .env
     fi
   fi
   if docker ps --format '{{.Names}}' | grep -qx otelcol; then
@@ -103,6 +106,7 @@ start_otelcol() {
   else
     docker run -d --name otelcol \
       -p "$grpc":4317 -p "$http":4318 \
+      -e SPLUNK_ACCESS_TOKEN -e APPDYNAMICS_AGENT_ACCOUNT_NAME -e APPDYNAMICS_CONTROLLER_HOST_NAME \
       -v "$ROOT/collector.yaml":/etc/otelcol/config.yaml \
       otel/opentelemetry-collector-contrib:latest \
       --config /etc/otelcol/config.yaml >/dev/null && ok "otelcol created"

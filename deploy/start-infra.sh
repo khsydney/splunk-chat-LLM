@@ -13,7 +13,9 @@ start() { # name, then docker run arguments
   if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then docker start "$name" >/dev/null
   else docker run -d --name "$name" --restart unless-stopped "$@" >/dev/null; fi
 }
-start otelcol -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 \
+# Created before the token moved to .env: recreate so it picks the variables up.
+docker inspect -f '{{.Config.Env}}' otelcol 2>/dev/null | grep -q 'SPLUNK_ACCESS_TOKEN=' || docker rm -f otelcol >/dev/null 2>&1 || true
+start otelcol -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 --env-file "$ROOT/.env" \
   -v "$ROOT/collector.yaml":/etc/otelcol/config.yaml \
   otel/opentelemetry-collector-contrib:latest --config /etc/otelcol/config.yaml
 start attu -p 127.0.0.1:8001:3000 --network milvus zilliz/attu:latest

@@ -93,7 +93,12 @@ GALILEO_PROJECT=<Galileo project name — must already exist in Galileo>
 GALILEO_LOG_STREAM=production
 AGENT_CONTROL_URL=<Agent Control server URL>
 ```
-The Splunk Observability Cloud ingest token and endpoints are configured in `collector.yaml` (`exporters.otlphttp/splunk`).
+The Splunk Observability Cloud endpoints are configured in `collector.yaml` (`exporters.otlphttp/splunk`). The collector reads its token and AppDynamics account from `.env`:
+```bash
+SPLUNK_ACCESS_TOKEN=<Splunk Observability Cloud ingest token>
+APPDYNAMICS_AGENT_ACCOUNT_NAME=<AppDynamics account name>
+APPDYNAMICS_CONTROLLER_HOST_NAME=<AppDynamics controller host>
+```
 
 Optional settings:
 ```bash
@@ -113,6 +118,7 @@ All of these are started by `./run.sh infra`.
 #### A) OpenTelemetry Collector
 ```bash
 docker run -d --name otelcol \
+  -e SPLUNK_ACCESS_TOKEN -e APPDYNAMICS_AGENT_ACCOUNT_NAME -e APPDYNAMICS_CONTROLLER_HOST_NAME \
   -p 4317:4317 -p 4318:4318 \
   -v "$PWD/collector.yaml":/etc/otelcol/config.yaml \
   otel/opentelemetry-collector-contrib:latest \
