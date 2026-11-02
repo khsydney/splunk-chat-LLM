@@ -1,4 +1,5 @@
 # app/rag_pipeline.py
+import atexit
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -24,7 +25,7 @@ from galileo.schema.content_blocks import TextContentBlock, DataContentBlock
 from agent_control import control, ControlViolationError, ControlSteerError
 
 _galileo: GalileoLogger | None = None
-_galileo_sessions: set[str] = set()  # tracks which session_ids have start_session() called
+_session_ids: dict[str, str] = {}  # app session_id -> Galileo session ID
 
 def _get_galileo() -> GalileoLogger | None:
     """Initialize GalileoLogger using project/log-stream IDs (like golden demo)."""
@@ -64,15 +65,49 @@ def _get_galileo() -> GalileoLogger | None:
     return _galileo
 
 
-def _ensure_session(g: GalileoLogger, session_id: str) -> None:
-    """Start a Galileo session for this session_id if not already started (golden demo pattern)."""
-    if session_id in _galileo_sessions:
+def _new_request_logger() -> GalileoLogger | None:
+    """One logger per chat: a logger has a single traces buffer and session_id, so sharing
+    one lets a chat's flush upload another's unfinished trace and mixes up sessions."""
+    import logging
+    base = _get_galileo()
+    if base is None:
+        return None
+    try:
+        # Passing both IDs skips the lookups; the Agent Control bridge registers itself in __init__.
+        return GalileoLogger(project_id=base.project_id, log_stream_id=base.log_stream_id)
+    except Exception as e:
+        logging.getLogger(__name__).warning("Galileo request logger failed, chat not logged: %s", e)
+        return None
+
+
+def _attach_session(g: GalileoLogger, session_id: str) -> None:
+    """Put this chat's logger on its Galileo session, creating the session on first use."""
+    import logging
+    _log = logging.getLogger(__name__)
+    cached = _session_ids.get(session_id)
+    if cached:
+        g.set_session(cached)  # no API call
         return
     try:
-        g.start_session(name=f"session-{session_id}", external_id=session_id)
-        _galileo_sessions.add(session_id)
-    except Exception:
-        pass
+        # start_session catches its own errors and returns None; don't cache that, so the next chat retries.
+        galileo_session_id = g.start_session(name=f"session-{session_id}", external_id=session_id)
+    except Exception as e:
+        _log.warning("Galileo session start failed for %s: %s", session_id, e)
+        return
+    if galileo_session_id is None:
+        _log.warning("Galileo session start failed for %s; trace uploads without a session", session_id)
+        return
+    _session_ids[session_id] = galileo_session_id
+
+
+def _release_request_logger(g: GalileoLogger) -> None:
+    """Drop the references that would otherwise keep a finished chat's logger and bridge alive."""
+    import logging
+    try:
+        g.disable_agent_control()
+    except Exception as e:
+        logging.getLogger(__name__).warning("Galileo Agent Control bridge cleanup failed: %s", e)
+    atexit.unregister(g.terminate)
 
 from langchain_community.chat_message_histories import RedisChatMessageHistory, ChatMessageHistory
 from langchain_core.runnables import RunnableWithMessageHistory
@@ -447,7 +482,7 @@ async def stream_generate(question: str, session_id: str = "default",
     the trace input, so they render inline (waveform player / image) in the Log stream.
     """
     import time as _time
-    g = _get_galileo()
+    g = _new_request_logger()
     _has_audio = bool(media and media.get("audio", {}).get("bytes"))
     _has_image = bool(media and media.get("image", {}).get("bytes"))
     _step = 0
@@ -456,7 +491,7 @@ async def stream_generate(question: str, session_id: str = "default",
         _step += 1
         return _step
     if g:
-        _ensure_session(g, session_id)
+        _attach_session(g, session_id)
         g.start_trace(
             input=build_trace_input(question, media),
             name="rag-pipeline",
@@ -707,35 +742,39 @@ async def stream_generate(question: str, session_id: str = "default",
         _genai_handler.stop_workflow(workflow)
         # Galileo LLM span + conclude + flush
         if g:
-            full_response = "".join(buf)
-            duration_ns = _time.monotonic_ns() - _llm_start_ns if _llm_start_ns else None
+            try:
+                full_response = "".join(buf)
+                duration_ns = _time.monotonic_ns() - _llm_start_ns if _llm_start_ns else None
 
-            # Reconstruct the exact message list the chain sent: rendered system prompt
-            # (with context) + prior turns from Redis + this question.
-            _msgs = [{"role": "system", "content": SYSTEM_PROMPT.format(context=_retrieved_context)}]
-            for _m in _history_msgs:
-                _role = {"human": "user", "ai": "assistant"}.get(
-                    getattr(_m, "type", ""), getattr(_m, "type", "user")
+                # Reconstruct the exact message list the chain sent: rendered system prompt
+                # (with context) + prior turns from Redis + this question.
+                _msgs = [{"role": "system", "content": SYSTEM_PROMPT.format(context=_retrieved_context)}]
+                for _m in _history_msgs:
+                    _role = {"human": "user", "ai": "assistant"}.get(
+                        getattr(_m, "type", ""), getattr(_m, "type", "user")
+                    )
+                    _msgs.append({"role": _role, "content": str(getattr(_m, "content", ""))})
+                _msgs.append({"role": "user", "content": question})
+
+                g.add_llm_span(
+                    input=_msgs,
+                    output={"role": "assistant", "content": full_response},
+                    model=CHAT_MODEL,
+                    temperature=TEMPERATURE,
+                    name="openai-chat",
+                    # step_number is the "topological step number" the Agent graph builds
+                    # edges from. Left unset, every span serializes as 0 and the graph can
+                    # only guess — the llm node ends up floating with no incoming arrow.
+                    step_number=_next_step(),
+                    duration_ns=duration_ns,
+                    num_input_tokens=_usage.get("input_tokens"),
+                    num_output_tokens=_usage.get("output_tokens"),
+                    total_tokens=_usage.get("total_tokens"),
+                    metadata={"num_history_messages": str(len(_history_msgs))},
                 )
-                _msgs.append({"role": _role, "content": str(getattr(_m, "content", ""))})
-            _msgs.append({"role": "user", "content": question})
-
-            g.add_llm_span(
-                input=_msgs,
-                output={"role": "assistant", "content": full_response},
-                model=CHAT_MODEL,
-                temperature=TEMPERATURE,
-                name="openai-chat",
-                # step_number is the "topological step number" the Agent graph builds
-                # edges from. Left unset, every span serializes as 0 and the graph can
-                # only guess — the llm node ends up floating with no incoming arrow.
-                step_number=_next_step(),
-                duration_ns=duration_ns,
-                num_input_tokens=_usage.get("input_tokens"),
-                num_output_tokens=_usage.get("output_tokens"),
-                total_tokens=_usage.get("total_tokens"),
-                metadata={"num_history_messages": str(len(_history_msgs))},
-            )
-            # conclude_all pops the workflow span AND the trace.
-            g.conclude(output=full_response, conclude_all=True)
-            await g.async_flush()
+                # conclude_all pops the workflow span AND the trace.
+                g.conclude(output=full_response, conclude_all=True)
+                await g.async_flush()
+            finally:
+                # Every early return passes through here too, so this is the one cleanup point.
+                _release_request_logger(g)
